@@ -190,6 +190,7 @@ type Config struct {
 	RFC2136BatchChangeSize                        int
 	RFC2136UseTLS                                 bool
 	RFC2136SkipTLSVerify                          bool
+	RFC2136ReadTimeout                            time.Duration
 	NS1Endpoint                                   string
 	NS1IgnoreSSL                                  bool
 	NS1MinTTLSeconds                              int
@@ -761,6 +762,7 @@ func bindFlags(b FlagBinder, cfg *Config) {
 	b.BoolVar("rfc2136-use-tls", "When using the RFC2136 provider, communicate with name server over tls", defaultConfig.RFC2136UseTLS, &cfg.RFC2136UseTLS)
 	b.BoolVar("rfc2136-skip-tls-verify", "When using TLS with the RFC2136 provider, disable verification of any TLS certificates", defaultConfig.RFC2136SkipTLSVerify, &cfg.RFC2136SkipTLSVerify)
 	b.EnumVar("rfc2136-load-balancing-strategy", "When using the RFC2136 provider, specify the load balancing strategy (default: disabled, options: random, round-robin, disabled)", defaultConfig.RFC2136LoadBalancingStrategy, &cfg.RFC2136LoadBalancingStrategy, "random", "round-robin", "disabled")
+	b.DurationVar("rfc2136-read-timeout", "The read timeout for the RFC2136 provider in duration format (default: 5s)", defaultConfig.RFC2136ReadTimeout, &cfg.RFC2136ReadTimeout)
 
 	// Flags related to TransIP provider
 	b.StringVar("transip-account", "When using the TransIP provider, specify the account name (required when --provider=transip)", defaultConfig.TransIPAccountName, &cfg.TransIPAccountName)

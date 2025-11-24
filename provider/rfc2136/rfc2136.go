@@ -60,6 +60,7 @@ type rfc2136Provider struct {
 	batchChangeSize int
 	tlsConfig       TLSConfig
 	createPTR       bool
+	readTimeout     time.Duration
 
 	// options specific to rfc3645 gss-tsig support
 	gssTsig      bool
@@ -110,7 +111,7 @@ type rfc2136Actions interface {
 }
 
 // NewRfc2136Provider is a factory function for OpenStack rfc2136 providers
-func NewRfc2136Provider(hosts []string, port int, zoneNames []string, insecure bool, keyName string, secret string, secretAlg string, axfr bool, domainFilter *endpoint.DomainFilter, dryRun bool, minTTL time.Duration, createPTR bool, gssTsig bool, krb5Username string, krb5Password string, krb5Realm string, batchChangeSize int, tlsConfig TLSConfig, loadBalancingStrategy string, actions rfc2136Actions) (provider.Provider, error) {
+func NewRfc2136Provider(hosts []string, port int, zoneNames []string, insecure bool, keyName string, secret string, secretAlg string, axfr bool, domainFilter *endpoint.DomainFilter, dryRun bool, minTTL time.Duration, createPTR bool, gssTsig bool, krb5Username string, krb5Password string, krb5Realm string, batchChangeSize int, tlsConfig TLSConfig, loadBalancingStrategy string, actions rfc2136Actions, readTimeout time.Duration) (provider.Provider, error) {
 	secretAlgChecked, ok := tsigAlgs[secretAlg]
 	if !ok && !insecure && !gssTsig {
 		return nil, fmt.Errorf("%s is not supported TSIG algorithm", secretAlg)
@@ -138,6 +139,7 @@ func NewRfc2136Provider(hosts []string, port int, zoneNames []string, insecure b
 		insecure:              insecure,
 		gssTsig:               gssTsig,
 		createPTR:             createPTR,
+		readTimeout:           readTimeout,
 		krb5Username:          krb5Username,
 		krb5Password:          krb5Password,
 		krb5Realm:             strings.ToUpper(krb5Realm),
@@ -249,6 +251,7 @@ OuterLoop:
 
 func (r *rfc2136Provider) IncomeTransfer(m *dns.Msg, nameserver string) (chan *dns.Envelope, error) {
 	t := new(dns.Transfer)
+
 	if !r.insecure && !r.gssTsig {
 		t.TsigSecret = map[string]string{r.tsigKeyName: r.tsigSecret}
 	}
@@ -300,6 +303,7 @@ func (r *rfc2136Provider) List() ([]dns.RR, error) {
 					} else {
 						log.Errorf("AXFR error: %v", e.Error)
 					}
+					lastErr = e.Error
 					continue
 				}
 				records = append(records, e.RR...)
@@ -657,6 +661,7 @@ func findMsgZone(ep *endpoint.Endpoint, zoneNames []string) string {
 
 func makeClient(r *rfc2136Provider, nameserver string) (*dns.Client, error) {
 	c := new(dns.Client)
+	c.ReadTimeout = r.readTimeout
 
 	// Remove port from nameserver
 	nameserver = strings.Split(nameserver, ":")[0]
