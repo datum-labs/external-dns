@@ -315,6 +315,9 @@ func (r *rfc2136Provider) List() ([]dns.RR, error) {
 		}
 
 		if lastErr != nil {
+			if e, ok := lastErr.(net.Error); ok && e.Timeout() {
+				lastErr = provider.NewSoftError(lastErr)
+			}
 			r.lastErr = lastErr
 			return nil, lastErr
 		}
