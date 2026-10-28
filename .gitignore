@@ -65,5 +65,3 @@ docs/redirect
 site
 _scratch
 Pipfile
-config.bat
-node_modules
