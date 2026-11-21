@@ -42,12 +42,12 @@ func Test_GetInstrumentationMiddlewares(t *testing.T) {
 		// Check Initialize stage
 		timedOperationMiddleware, found := stack.Initialize.Get("timedOperation")
 		assert.True(t, found, "timedOperation middleware should be present in Initialize stage")
-		assert.NotNil(t, timedOperationMiddleware)
+		require.NotNil(t, timedOperationMiddleware)
 
 		// Check Deserialize stage
 		extractAWSRequestParametersMiddleware, found := stack.Deserialize.Get("extractAWSRequestParameters")
 		assert.True(t, found, "extractAWSRequestParameters middleware should be present in Deserialize stage")
-		assert.NotNil(t, extractAWSRequestParametersMiddleware)
+		require.NotNil(t, extractAWSRequestParametersMiddleware)
 	})
 }
 
@@ -55,32 +55,32 @@ type MockInitializeHandler struct {
 	CapturedContext context.Context
 }
 
-func (mock *MockInitializeHandler) HandleInitialize(ctx context.Context, in middleware.InitializeInput) (middleware.InitializeOutput, middleware.Metadata, error) {
+func (mock *MockInitializeHandler) HandleInitialize(ctx context.Context, _ middleware.InitializeInput) (middleware.InitializeOutput, middleware.Metadata, error) {
 	mock.CapturedContext = ctx
 
 	return middleware.InitializeOutput{}, middleware.Metadata{}, nil
 }
 
 func Test_InitializedTimedOperationMiddleware(t *testing.T) {
-	testContext := context.Background()
+	testContext := t.Context()
 	mockInitializeHandler := &MockInitializeHandler{}
 
 	_, _, err := initializeTimedOperationMiddleware.HandleInitialize(testContext, middleware.InitializeInput{}, mockInitializeHandler)
 	require.NoError(t, err)
 
 	requestMetrics := middleware.GetStackValue(mockInitializeHandler.CapturedContext, requestMetricsKey{}).(requestMetrics)
-	assert.NotNil(t, requestMetrics.StartTime)
+	require.NotNil(t, requestMetrics.StartTime)
 }
 
 type MockDeserializeHandler struct {
 }
 
-func (mock *MockDeserializeHandler) HandleDeserialize(ctx context.Context, in middleware.DeserializeInput) (middleware.DeserializeOutput, middleware.Metadata, error) {
+func (mock *MockDeserializeHandler) HandleDeserialize(_ context.Context, _ middleware.DeserializeInput) (middleware.DeserializeOutput, middleware.Metadata, error) {
 	return middleware.DeserializeOutput{}, middleware.Metadata{}, nil
 }
 
 func Test_ExtractAWSRequestParameters(t *testing.T) {
-	testContext := context.Background()
+	testContext := t.Context()
 	middleware.WithStackValue(testContext, requestMetricsKey{}, requestMetrics{StartTime: time.Now()})
 
 	mockDeserializeHandler := &MockDeserializeHandler{}

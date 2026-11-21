@@ -17,13 +17,13 @@ limitations under the License.
 package godaddy
 
 import (
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 )
 
@@ -32,7 +32,7 @@ func TestClient_DoWhenQuotaExceeded(t *testing.T) {
 	assert := assert.New(t)
 
 	// Mock server to return 429 with a JSON payload
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, err := w.Write([]byte(`{"code": "QUOTA_EXCEEDED", "message": "rate limit exceeded"}`))
@@ -58,15 +58,14 @@ func TestClient_DoWhenQuotaExceeded(t *testing.T) {
 	}
 
 	resp, err := client.Do(req)
-	assert.NoError(err, "A CODE_EXCEEDED response should not return an error")
+	require.NoError(t, err, "A CODE_EXCEEDED response should not return an error")
 	assert.Equal(http.StatusTooManyRequests, resp.StatusCode, "Expected a 429 response")
 
 	respContents := GDErrorResponse{}
 	err = client.UnmarshalResponse(resp, &respContents)
-	if assert.Error(err) {
-		var apiErr *APIError
-		errors.As(err, &apiErr)
-		assert.Equal("QUOTA_EXCEEDED", apiErr.Code)
-		assert.Equal("rate limit exceeded", apiErr.Message)
-	}
+	require.Error(t, err)
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal("QUOTA_EXCEEDED", apiErr.Code)
+	assert.Equal("rate limit exceeded", apiErr.Message)
 }

@@ -23,19 +23,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudflare/cloudflare-go/v5/addressing"
-	"github.com/cloudflare/cloudflare-go/v5/dns"
+	"github.com/cloudflare/cloudflare-go/v7/addressing"
+	"github.com/cloudflare/cloudflare-go/v7/dns"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"sigs.k8s.io/external-dns/endpoint"
-	"sigs.k8s.io/external-dns/internal/testutils"
+	logtest "sigs.k8s.io/external-dns/internal/testutils/log"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/source/annotations"
 )
 
-func (m *mockCloudFlareClient) ListDataLocalizationRegionalHostnames(ctx context.Context, params addressing.RegionalHostnameListParams) autoPager[addressing.RegionalHostnameListResponse] {
+func (m *mockCloudFlareClient) ListDataLocalizationRegionalHostnames(_ context.Context, params addressing.RegionalHostnameListParams) autoPager[addressing.RegionalHostnameListResponse] {
 	zoneID := params.ZoneID.Value
 	if strings.Contains(zoneID, "rherror") {
 		return &mockAutoPager[addressing.RegionalHostnameListResponse]{err: fmt.Errorf("failed to list regional hostnames")}
@@ -52,7 +53,7 @@ func (m *mockCloudFlareClient) ListDataLocalizationRegionalHostnames(ctx context
 	}
 }
 
-func (m *mockCloudFlareClient) CreateDataLocalizationRegionalHostname(ctx context.Context, params addressing.RegionalHostnameNewParams) error {
+func (m *mockCloudFlareClient) CreateDataLocalizationRegionalHostname(_ context.Context, params addressing.RegionalHostnameNewParams) error {
 	if strings.Contains(params.Hostname.Value, "rherror") {
 		return fmt.Errorf("failed to create regional hostname")
 	}
@@ -69,7 +70,7 @@ func (m *mockCloudFlareClient) CreateDataLocalizationRegionalHostname(ctx contex
 	return nil
 }
 
-func (m *mockCloudFlareClient) UpdateDataLocalizationRegionalHostname(ctx context.Context, hostname string, params addressing.RegionalHostnameEditParams) error {
+func (m *mockCloudFlareClient) UpdateDataLocalizationRegionalHostname(_ context.Context, hostname string, params addressing.RegionalHostnameEditParams) error {
 	if strings.Contains(hostname, "rherror") {
 		return fmt.Errorf("failed to update regional hostname")
 	}
@@ -86,7 +87,7 @@ func (m *mockCloudFlareClient) UpdateDataLocalizationRegionalHostname(ctx contex
 	return nil
 }
 
-func (m *mockCloudFlareClient) DeleteDataLocalizationRegionalHostname(ctx context.Context, hostname string, params addressing.RegionalHostnameDeleteParams) error {
+func (m *mockCloudFlareClient) DeleteDataLocalizationRegionalHostname(_ context.Context, hostname string, params addressing.RegionalHostnameDeleteParams) error {
 	if strings.Contains(hostname, "rherror") {
 		return fmt.Errorf("failed to delete regional hostname")
 	}
@@ -120,7 +121,7 @@ func TestCloudflareRegionalHostnameActions(t *testing.T) {
 					Targets:    endpoint.Targets{"127.0.0.1"},
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "eu",
 						},
 					},
@@ -175,7 +176,7 @@ func TestCloudflareRegionalHostnameActions(t *testing.T) {
 					Targets:    endpoint.Targets{"127.0.0.1"},
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "eu",
 						},
 					},
@@ -265,7 +266,7 @@ func TestCloudflareRegionalHostnameActions(t *testing.T) {
 					Targets:    endpoint.Targets{"127.0.0.1"},
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "eu",
 						},
 					},
@@ -397,7 +398,7 @@ func Test_regionalHostname(t *testing.T) {
 					DNSName:    "example.com",
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "eu",
 						},
 					},
@@ -420,7 +421,7 @@ func Test_regionalHostname(t *testing.T) {
 					DNSName:    "example.com",
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "",
 						},
 					},
@@ -443,7 +444,7 @@ func Test_regionalHostname(t *testing.T) {
 					DNSName:    "example.com",
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "eu",
 						},
 					},
@@ -463,7 +464,7 @@ func Test_regionalHostname(t *testing.T) {
 					DNSName:    "example.com",
 					ProviderSpecific: endpoint.ProviderSpecific{
 						{
-							Name:  "external-dns.alpha.kubernetes.io/cloudflare-region-key",
+							Name:  annotations.CloudflareRegionProperty,
 							Value: "us",
 						},
 					},
@@ -725,9 +726,9 @@ func Test_desiredDataLocalizationRegionalHostnames(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := desiredRegionalHostnames(tt.changes)
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 			sort.Slice(got, func(i, j int) bool {
 				return got[i].hostname < got[j].hostname
@@ -793,25 +794,19 @@ func Test_dataLocalizationRegionalHostnamesChanges(t *testing.T) {
 			},
 			want: []regionalHostnameChange{
 				{
-					action: cloudFlareCreate,
-					regionalHostname: regionalHostname{
-						hostname:  "create.example.com",
-						regionKey: "eu",
-					},
+					action:    cloudFlareCreate,
+					hostname:  "create.example.com",
+					regionKey: "eu",
 				},
 				{
-					action: cloudFlareUpdate,
-					regionalHostname: regionalHostname{
-						hostname:  "update.example.com",
-						regionKey: "eu",
-					},
+					action:    cloudFlareUpdate,
+					hostname:  "update.example.com",
+					regionKey: "eu",
 				},
 				{
-					action: cloudFlareDelete,
-					regionalHostname: regionalHostname{
-						hostname:  "delete.example.com",
-						regionKey: "",
-					},
+					action:    cloudFlareDelete,
+					hostname:  "delete.example.com",
+					regionKey: "",
 				},
 			},
 		},
@@ -839,7 +834,7 @@ func TestRecordsWithListRegionalHostnameFaillure(t *testing.T) {
 		RegionalServicesConfig: RegionalServicesConfig{Enabled: true},
 	}
 	_, err := failingProvider.Records(t.Context())
-	assert.Error(t, err, "listing regional hostnames should fail")
+	require.Error(t, err, "listing regional hostnames should fail")
 }
 
 func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
@@ -869,7 +864,7 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 							DNSName:    "foo.error.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -892,7 +887,7 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 							DNSName:    "rherror.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -924,7 +919,7 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 							DNSName:    "rherror.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -934,7 +929,7 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 							DNSName:    "rherror.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.2"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -987,7 +982,7 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 							DNSName:    "foo.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 						{
@@ -995,7 +990,7 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 							DNSName:    "foo.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "us"},
+								{Name: annotations.CloudflareRegionProperty, Value: "us"},
 							},
 						},
 					},
@@ -1029,14 +1024,14 @@ func TestApplyChangesWithRegionalHostnamesFaillures(t *testing.T) {
 					RegionKey: tt.fields.RegionKey,
 				},
 			}
-			hook := testutils.LogsUnderTestWithLogLevel(log.DebugLevel, t)
+			hook := logtest.LogsUnderTestWithLogLevel(log.DebugLevel, t)
 			err := p.ApplyChanges(t.Context(), tt.args.changes)
-			assert.Error(t, err, "ApplyChanges should return an error")
+			require.Error(t, err, "ApplyChanges should return an error")
 			if tt.errMsg != "" && err != nil {
 				assert.Contains(t, err.Error(), tt.errMsg, "Expected error message to contain: %s", tt.errMsg)
 			}
 			if tt.expectDebug != "" {
-				testutils.TestHelperLogContains(tt.expectDebug, hook, t)
+				logtest.TestHelperLogContains(tt.expectDebug, hook, t)
 			}
 		})
 	}
@@ -1073,7 +1068,7 @@ func TestApplyChangesWithRegionalHostnamesDryRun(t *testing.T) {
 							DNSName:    "foo.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -1105,7 +1100,7 @@ func TestApplyChangesWithRegionalHostnamesDryRun(t *testing.T) {
 							DNSName:    "foo.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.1"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -1115,7 +1110,7 @@ func TestApplyChangesWithRegionalHostnamesDryRun(t *testing.T) {
 							DNSName:    "foo.bar.com",
 							Targets:    endpoint.Targets{"127.0.0.2"},
 							ProviderSpecific: endpoint.ProviderSpecific{
-								{Name: "external-dns.alpha.kubernetes.io/cloudflare-region-key", Value: "eu"},
+								{Name: annotations.CloudflareRegionProperty, Value: "eu"},
 							},
 						},
 					},
@@ -1178,11 +1173,11 @@ func TestApplyChangesWithRegionalHostnamesDryRun(t *testing.T) {
 					RegionKey: tt.fields.RegionKey,
 				},
 			}
-			hook := testutils.LogsUnderTestWithLogLevel(log.DebugLevel, t)
+			hook := logtest.LogsUnderTestWithLogLevel(log.DebugLevel, t)
 			err := p.ApplyChanges(t.Context(), tt.args.changes)
-			assert.NoError(t, err, "ApplyChanges should not fail")
+			require.NoError(t, err, "ApplyChanges should not fail")
 			if tt.expectDebug != "" {
-				testutils.TestHelperLogContains(tt.expectDebug, hook, t)
+				logtest.TestHelperLogContains(tt.expectDebug, hook, t)
 			}
 		})
 	}
@@ -1202,21 +1197,21 @@ func TestCloudflareAdjustEndpointsRegionalServices(t *testing.T) {
 			recordType:             "A",
 			regionalServicesConfig: RegionalServicesConfig{Enabled: true, RegionKey: "us"},
 			initialRegionKey:       "",
-			expectedRegionKey:      testutils.ToPtr("us"),
+			expectedRegionKey:      new("us"),
 		},
 		{
 			name:                   "AAAA record with regional services enabled",
 			recordType:             "AAAA",
 			regionalServicesConfig: RegionalServicesConfig{Enabled: true, RegionKey: "us"},
 			initialRegionKey:       "",
-			expectedRegionKey:      testutils.ToPtr("us"),
+			expectedRegionKey:      new("us"),
 		},
 		{
 			name:                   "CNAME record with regional services enabled",
 			recordType:             "CNAME",
 			regionalServicesConfig: RegionalServicesConfig{Enabled: true, RegionKey: "us"},
 			initialRegionKey:       "",
-			expectedRegionKey:      testutils.ToPtr("us"),
+			expectedRegionKey:      new("us"),
 		},
 
 		// Unsupported types should NOT get region key even when enabled
@@ -1250,7 +1245,7 @@ func TestCloudflareAdjustEndpointsRegionalServices(t *testing.T) {
 			recordType:             "A",
 			regionalServicesConfig: RegionalServicesConfig{Enabled: true, RegionKey: "us"},
 			initialRegionKey:       "eu",
-			expectedRegionKey:      testutils.ToPtr("eu"),
+			expectedRegionKey:      new("eu"),
 		},
 	}
 
@@ -1266,7 +1261,7 @@ func TestCloudflareAdjustEndpointsRegionalServices(t *testing.T) {
 			if tc.initialRegionKey != "" {
 				testEndpoint.ProviderSpecific = endpoint.ProviderSpecific{
 					endpoint.ProviderSpecificProperty{
-						Name:  annotations.CloudflareRegionKey,
+						Name:  annotations.CloudflareRegionProperty,
 						Value: tc.initialRegionKey,
 					},
 				}
@@ -1277,10 +1272,10 @@ func TestCloudflareAdjustEndpointsRegionalServices(t *testing.T) {
 			}
 
 			adjustedEndpoints, err := provider.AdjustEndpoints([]*endpoint.Endpoint{testEndpoint})
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Len(t, adjustedEndpoints, 1)
 
-			regionKey, exists := adjustedEndpoints[0].GetProviderSpecificProperty(annotations.CloudflareRegionKey)
+			regionKey, exists := adjustedEndpoints[0].GetProviderSpecificProperty(annotations.CloudflareRegionProperty)
 
 			if tc.expectedRegionKey != nil {
 				// Region key should be present with expected value
@@ -1292,4 +1287,90 @@ func TestCloudflareAdjustEndpointsRegionalServices(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSubmitChanges_DryRun_RegionalErrors covers error paths in the dry-run branch of
+// submitChanges. Two statements in that branch are not covered by any test:
+//
+//   - the `failedChange = true` body inside `if !p.submitRegionalHostnameChanges(...)`
+//   - the subsequent `failedZones = append(...)` when failedChange is true
+//
+// Both are unreachable because submitRegionalHostnameChange unconditionally returns true
+// when DryRun=true (it logs and returns before making any API call), so the failure
+// branch can never be entered without changing the production code.
+func TestSubmitChanges_DryRun_RegionalErrors(t *testing.T) {
+	t.Run("desiredRegionalHostnames conflict returns error", func(t *testing.T) {
+		// Two changes for the same hostname with different region keys →
+		// desiredRegionalHostnames returns a conflict error.
+		client := NewMockCloudFlareClient()
+		p := &CloudFlareProvider{
+			Client: client,
+			DryRun: true,
+			RegionalServicesConfig: RegionalServicesConfig{
+				Enabled: true,
+			},
+		}
+
+		// Build conflicting cloudFlareChanges directly and call submitChanges,
+		// which is in the same package.
+		changes := []*cloudFlareChange{
+			{
+				Action:         cloudFlareCreate,
+				ResourceRecord: dns.RecordResponse{Name: "foo.bar.com", Type: "A", Content: "1.2.3.4"},
+				RegionalHostname: regionalHostname{
+					hostname:  "foo.bar.com",
+					regionKey: "us",
+				},
+			},
+			{
+				Action:         cloudFlareUpdate,
+				ResourceRecord: dns.RecordResponse{Name: "foo.bar.com", Type: "A", Content: "1.2.3.4"},
+				RegionalHostname: regionalHostname{
+					hostname:  "foo.bar.com",
+					regionKey: "eu", // different from "us" → conflict
+				},
+			},
+		}
+		err := p.submitChanges(t.Context(), changes)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to build desired regional hostnames")
+	})
+
+	t.Run("listDataLocalisationRegionalHostnames error in dry-run returns error", func(t *testing.T) {
+		// Zone ID containing "rherror" causes the mock to return an error from
+		// ListDataLocalizationRegionalHostnames.
+		client := &mockCloudFlareClient{
+			Zones: map[string]string{
+				"rherror-zone1": "rherror.bar.com",
+			},
+			Records: map[string]map[string]dns.RecordResponse{
+				"rherror-zone1": {},
+			},
+			customHostnames:   map[string][]customHostname{},
+			regionalHostnames: map[string][]regionalHostname{},
+		}
+		p := &CloudFlareProvider{
+			Client: client,
+			DryRun: true,
+			RegionalServicesConfig: RegionalServicesConfig{
+				Enabled:   true,
+				RegionKey: "us",
+			},
+			domainFilter: endpoint.NewDomainFilter([]string{"rherror.bar.com"}),
+		}
+
+		changes := []*cloudFlareChange{
+			{
+				Action:         cloudFlareCreate,
+				ResourceRecord: dns.RecordResponse{Name: "foo.rherror.bar.com", Type: "A", Content: "1.2.3.4"},
+				RegionalHostname: regionalHostname{
+					hostname:  "foo.rherror.bar.com",
+					regionKey: "us",
+				},
+			},
+		}
+		err := p.submitChanges(t.Context(), changes)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "could not fetch regional hostnames from zone")
+	})
 }

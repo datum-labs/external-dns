@@ -52,20 +52,12 @@ func getEndpointsTypeFromAnnotations(annots map[string]string) string {
 	return annots[annotations.EndpointsTypeKey]
 }
 
-func getLabelSelector(annotationFilter string) (labels.Selector, error) {
-	labelSelector, err := metav1.ParseToLabelSelector(annotationFilter)
-	if err != nil {
-		return nil, err
-	}
-	return metav1.LabelSelectorAsSelector(labelSelector)
-}
-
 func matchLabelSelector(selector labels.Selector, srcAnnotations map[string]string) bool {
 	return selector.Matches(labels.Set(srcAnnotations))
 }
 
 type eventHandlerFunc func()
 
-func (fn eventHandlerFunc) OnAdd(obj interface{}, isInInitialList bool) { fn() }
-func (fn eventHandlerFunc) OnUpdate(oldObj, newObj interface{})         { fn() }
-func (fn eventHandlerFunc) OnDelete(obj interface{})                    { fn() }
+func (fn eventHandlerFunc) OnAdd(_ any, _ bool) { fn() }
+func (fn eventHandlerFunc) OnUpdate(_, _ any)   { fn() }
+func (fn eventHandlerFunc) OnDelete(_ any)      { fn() }

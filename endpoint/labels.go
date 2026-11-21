@@ -41,6 +41,9 @@ const (
 	// supposed to be inserted by AWS SD Provider, and parsed into OwnerLabelKey and ResourceLabelKey key by AWS SD Registry
 	AWSSDDescriptionLabel = "aws-sd-description"
 
+	// AWSSDDualstackLabelKey is transient AWS-SD metadata, excluded from serialization.
+	AWSSDDualstackLabelKey = "aws-sd-dualstack"
+
 	// txtEncryptionNonce label for keep same nonce for same txt records, for prevent different result of encryption for same txt record, it can cause issues for some providers
 	txtEncryptionNonce = "txt-encryption-nonce"
 )
@@ -63,11 +66,10 @@ func NewLabelsFromStringPlain(labelText string) (Labels, error) {
 	tokens := strings.Split(labelText, ",")
 	foundExternalDNSHeritage := false
 	for _, token := range tokens {
-		if len(strings.Split(token, "=")) != 2 {
+		key, val, ok := strings.Cut(token, "=")
+		if !ok {
 			continue
 		}
-		key := strings.Split(token, "=")[0]
-		val := strings.Split(token, "=")[1]
 		if key == "heritage" && val != heritage {
 			return nil, ErrInvalidHeritage
 		}
@@ -116,7 +118,7 @@ func (l Labels) SerializePlain(withQuotes bool) string {
 	sort.Strings(keys) // sort for consistency
 
 	for _, key := range keys {
-		if key == txtEncryptionNonce {
+		if key == txtEncryptionNonce || key == AWSSDDualstackLabelKey {
 			continue
 		}
 		tokens = append(tokens, fmt.Sprintf("%s/%s=%s", heritage, key, l[key]))
@@ -133,16 +135,14 @@ func (l Labels) Serialize(withQuotes bool, txtEncryptEnabled bool, aesKey []byte
 		return l.SerializePlain(withQuotes)
 	}
 
-	var encryptionNonce []byte
-	if extractedNonce, nonceExists := l[txtEncryptionNonce]; nonceExists {
-		encryptionNonce = []byte(extractedNonce)
-	} else {
+	encryptionNonce, ok := l[txtEncryptionNonce]
+	if !ok {
 		var err error
 		encryptionNonce, err = GenerateNonce()
 		if err != nil {
-			log.Fatalf("Failed to generate cryptographic nonce %#v.", err)
+			log.Fatalf("Failed to generate cryptographic nonce: %v", err)
 		}
-		l[txtEncryptionNonce] = string(encryptionNonce)
+		l[txtEncryptionNonce] = encryptionNonce
 	}
 
 	text := l.SerializePlain(false)
@@ -150,8 +150,9 @@ func (l Labels) Serialize(withQuotes bool, txtEncryptEnabled bool, aesKey []byte
 	var err error
 	text, err = EncryptText(text, aesKey, encryptionNonce)
 	if err != nil {
+		// TODO: review if we could return error instead of crashing the external-dns
 		// if encryption failed, the external-dns will crash
-		log.Fatalf("Failed to encrypt the text %#v using the encryption key %#v. Got error %#v.", text, aesKey, err)
+		log.Fatalf("Failed to encrypt the text: %v", err)
 	}
 
 	if withQuotes {

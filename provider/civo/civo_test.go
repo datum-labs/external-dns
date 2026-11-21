@@ -16,8 +16,8 @@ limitations under the License.
 package civo
 
 import (
-	"context"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -25,6 +25,7 @@ import (
 
 	"github.com/civo/civogo"
 	"github.com/google/go-cmp/cmp"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,17 +33,17 @@ import (
 	"sigs.k8s.io/external-dns/plan"
 )
 
-func TestNewCivoProvider(t *testing.T) {
-	_ = os.Setenv("CIVO_TOKEN", "xxxxxxxxxxxxxxx")
-	_, err := NewCivoProvider(endpoint.NewDomainFilter([]string{"test.civo.com"}), true)
+func TestNewProvider(t *testing.T) {
+	t.Setenv("CIVO_TOKEN", "xxxxxxxxxxxxxxx")
+	_, err := newProvider(endpoint.NewDomainFilter([]string{"test.civo.com"}), true)
 	require.NoError(t, err)
 
 	_ = os.Unsetenv("CIVO_TOKEN")
 }
 
 func TestNewCivoProviderNoToken(t *testing.T) {
-	_, err := NewCivoProvider(endpoint.NewDomainFilter([]string{"test.civo.com"}), true)
-	assert.Error(t, err)
+	_, err := newProvider(endpoint.NewDomainFilter([]string{"test.civo.com"}), true)
+	require.Error(t, err)
 
 	assert.Equal(t, "no token found", err.Error())
 }
@@ -60,13 +61,12 @@ func TestCivoProviderZones(t *testing.T) {
 	}
 
 	expected, err := client.ListDNSDomains()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	zones, err := provider.Zones(context.Background())
-	assert.NoError(t, err)
+	zones, err := provider.Zones(t.Context())
+	require.NoError(t, err)
 
 	// Check if the return is a DNSDomain type
-	assert.Equal(t, reflect.TypeOf(zones), reflect.TypeOf(expected))
 	assert.ElementsMatch(t, zones, expected)
 }
 
@@ -79,8 +79,8 @@ func TestCivoProviderZonesWithError(t *testing.T) {
 		Client: *client,
 	}
 
-	_, err := provider.Zones(context.Background())
-	assert.Error(t, err)
+	_, err := provider.Zones(t.Context())
+	require.Error(t, err)
 }
 
 func TestCivoProviderRecords(t *testing.T) {
@@ -115,10 +115,10 @@ func TestCivoProviderRecords(t *testing.T) {
 	}
 
 	expected, err := client.ListDNSRecords("12345")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	records, err := provider.Records(context.Background())
-	assert.NoError(t, err)
+	records, err := provider.Records(t.Context())
+	require.NoError(t, err)
 
 	assert.Equal(t, strings.TrimSuffix(records[0].DNSName, ".example.com"), expected[0].Name)
 	assert.Equal(t, records[0].RecordType, string(expected[0].Type))
@@ -159,11 +159,11 @@ func TestCivoProviderRecordsWithError(t *testing.T) {
 	}
 
 	_, err := client.ListDNSRecords("12345")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	endpoint, err := provider.Records(context.Background())
-	assert.Error(t, err)
-	assert.Nil(t, endpoint)
+	endpoint, err := provider.Records(t.Context())
+	require.Error(t, err)
+	require.Nil(t, endpoint)
 
 }
 
@@ -181,13 +181,14 @@ func TestCivoProviderWithoutRecords(t *testing.T) {
 		domainFilter: endpoint.NewDomainFilter([]string{"example.com"}),
 	}
 
-	records, err := provider.Records(context.Background())
-	assert.NoError(t, err)
+	records, err := provider.Records(t.Context())
+	require.NoError(t, err)
 
 	assert.Empty(t, records)
 }
 
 func TestCivoProcessCreateActionsLogs(t *testing.T) {
+	log.SetOutput(io.Discard)
 	t.Run("Logs Skipping Zone, no creates found", func(t *testing.T) {
 		zonesByID := map[string]civogo.DNSDomain{
 			"example.com": {
@@ -356,6 +357,7 @@ func TestCivoProcessCreateActionsWithError(t *testing.T) {
 }
 
 func TestCivoProcessUpdateActionsWithError(t *testing.T) {
+	log.SetOutput(io.Discard)
 	zoneByID := map[string]civogo.DNSDomain{
 		"example.com": {
 			ID:        "1",
@@ -616,6 +618,7 @@ func TestCivoProcessDeleteAction(t *testing.T) {
 }
 
 func TestCivoApplyChanges(t *testing.T) {
+	log.SetOutput(io.Discard)
 	client, server, _ := civogo.NewAdvancedClientForTesting([]civogo.ConfigAdvanceClientForTesting{
 		{
 			Method: "GET",
@@ -646,11 +649,12 @@ func TestCivoApplyChanges(t *testing.T) {
 	changes.Delete = []*endpoint.Endpoint{{DNSName: "foobar.ext-dns-test.example.com", RecordType: endpoint.RecordTypeA, Targets: endpoint.Targets{"target"}}}
 	changes.UpdateOld = []*endpoint.Endpoint{{DNSName: "foobar.ext-dns-test.example.de", RecordType: endpoint.RecordTypeA, Targets: endpoint.Targets{"target-old"}}}
 	changes.UpdateNew = []*endpoint.Endpoint{{DNSName: "foobar.ext-dns-test.foo.com", Targets: endpoint.Targets{"target-new"}, RecordType: endpoint.RecordTypeCNAME, RecordTTL: 100}}
-	err := provider.ApplyChanges(context.Background(), changes)
-	assert.NoError(t, err)
+	err := provider.ApplyChanges(t.Context(), changes)
+	require.NoError(t, err)
 }
 
 func TestCivoApplyChangesError(t *testing.T) {
+	log.SetOutput(io.Discard)
 	client, server, _ := civogo.NewAdvancedClientForTesting([]civogo.ConfigAdvanceClientForTesting{
 		{
 			Method: "GET",
@@ -702,7 +706,7 @@ func TestCivoApplyChangesError(t *testing.T) {
 
 	for _, tt := range cases {
 		t.Run(tt.Name, func(t *testing.T) {
-			err := provider.ApplyChanges(context.Background(), tt.changes)
+			err := provider.ApplyChanges(t.Context(), tt.changes)
 			assert.Equal(t, "invalid Record Type: AAAA", string(err.Error()))
 		})
 	}
@@ -724,7 +728,7 @@ func TestCivoProviderFetchZones(t *testing.T) {
 	if err != nil {
 		t.Errorf("should not fail, %s", err)
 	}
-	zones, err := provider.fetchZones(context.Background())
+	zones, err := provider.fetchZones()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,7 +751,7 @@ func TestCivoProviderFetchZonesWithFilter(t *testing.T) {
 		{ID: "12345", Name: "example.com", AccountID: "1"},
 	}
 
-	actual, err := provider.fetchZones(context.Background())
+	actual, err := provider.fetchZones()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,15 +771,16 @@ func TestCivoProviderFetchRecords(t *testing.T) {
 	}
 
 	expected, err := client.ListDNSRecords("12345")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	actual, err := provider.fetchRecords(context.Background(), "12345")
-	assert.NoError(t, err)
+	actual, err := provider.fetchRecords("12345")
+	require.NoError(t, err)
 
 	assert.ElementsMatch(t, expected, actual)
 }
 
 func TestCivoProviderFetchRecordsWithError(t *testing.T) {
+	log.SetOutput(io.Discard)
 	client, server, _ := civogo.NewClientForTesting(map[string]string{
 		"/v2/dns/12345/records": `[
 			{"id": "1", "domain_id":"12345", "account_id": "1", "name": "www", "type": "A", "value": "10.0.0.0", "ttl": 600},
@@ -787,8 +792,8 @@ func TestCivoProviderFetchRecordsWithError(t *testing.T) {
 		Client: *client,
 	}
 
-	_, err := provider.fetchRecords(context.Background(), "235698")
-	assert.Error(t, err)
+	_, err := provider.fetchRecords("235698")
+	require.Error(t, err)
 }
 
 func TestCivo_getStrippedRecordName(t *testing.T) {
@@ -861,6 +866,7 @@ func TestCivoProviderGetRecordID(t *testing.T) {
 }
 
 func TestCivo_submitChangesCreate(t *testing.T) {
+	log.SetOutput(io.Discard)
 	client, server, _ := civogo.NewAdvancedClientForTesting([]civogo.ConfigAdvanceClientForTesting{
 		{
 			Method: "POST",
@@ -979,8 +985,8 @@ func TestCivo_submitChangesCreate(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := provider.submitChanges(context.Background(), *c.changes)
-			assert.NoError(t, err)
+			err := provider.submitChanges(*c.changes)
+			require.NoError(t, err)
 		})
 	}
 }
@@ -1014,8 +1020,8 @@ func TestCivo_submitChangesDelete(t *testing.T) {
 		},
 	}
 
-	err := provider.submitChanges(context.Background(), changes)
-	assert.NoError(t, err)
+	err := provider.submitChanges(changes)
+	require.NoError(t, err)
 }
 
 func TestCivoChangesEmpty(t *testing.T) {
@@ -1169,7 +1175,7 @@ func TestCivoChangesEmpty(t *testing.T) {
 // This function is an adapted copy of the testify package's ElementsMatch function with the
 // call to ObjectsAreEqual replaced with cmp.Equal which better handles struct's with pointers to
 // other structs. It also ignores ordering when comparing unlike cmp.Equal.
-func elementsMatch(t *testing.T, listA, listB interface{}, msgAndArgs ...interface{}) bool {
+func elementsMatch(t *testing.T, listA, listB any) bool {
 	switch {
 	case listA == nil && listB == nil:
 		return true
@@ -1183,11 +1189,11 @@ func elementsMatch(t *testing.T, listA, listB interface{}, msgAndArgs ...interfa
 	bKind := reflect.TypeOf(listB).Kind()
 
 	if aKind != reflect.Array && aKind != reflect.Slice {
-		return assert.Fail(t, fmt.Sprintf("%q has an unsupported type %s", listA, aKind), msgAndArgs...)
+		return assert.Fail(t, fmt.Sprintf("%q has an unsupported type %s", listA, aKind))
 	}
 
 	if bKind != reflect.Array && bKind != reflect.Slice {
-		return assert.Fail(t, fmt.Sprintf("%q has an unsupported type %s", listB, bKind), msgAndArgs...)
+		return assert.Fail(t, fmt.Sprintf("%q has an unsupported type %s", listB, bKind))
 	}
 
 	aValue := reflect.ValueOf(listA)
@@ -1197,15 +1203,15 @@ func elementsMatch(t *testing.T, listA, listB interface{}, msgAndArgs ...interfa
 	bLen := bValue.Len()
 
 	if aLen != bLen {
-		return assert.Fail(t, fmt.Sprintf("lengths don't match: %d != %d", aLen, bLen), msgAndArgs...)
+		return assert.Fail(t, fmt.Sprintf("lengths don't match: %d != %d", aLen, bLen))
 	}
 
 	// Mark indexes in bValue that we already used
 	visited := make([]bool, bLen)
-	for i := 0; i < aLen; i++ {
+	for i := range aLen {
 		element := aValue.Index(i).Interface()
 		found := false
-		for j := 0; j < bLen; j++ {
+		for j := range bLen {
 			if visited[j] {
 				continue
 			}
@@ -1216,14 +1222,14 @@ func elementsMatch(t *testing.T, listA, listB interface{}, msgAndArgs ...interfa
 			}
 		}
 		if !found {
-			return assert.Fail(t, fmt.Sprintf("element %s appears more times in %s than in %s", element, aValue, bValue), msgAndArgs...)
+			return assert.Fail(t, fmt.Sprintf("element %s appears more times in %s than in %s", element, aValue, bValue))
 		}
 	}
 
 	return true
 }
 
-func isEmpty(xs interface{}) bool {
+func isEmpty(xs any) bool {
 	if xs != nil {
 		objValue := reflect.ValueOf(xs)
 		return objValue.Len() == 0

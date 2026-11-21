@@ -1,3 +1,6 @@
+---
+tags: ["advanced", "area/events", "events"]
+---
 # Kubernetes Events in External-DNS
 
 External-DNS manages DNS records dynamically based on Kubernetes resources like Services and Ingresses.
@@ -31,6 +34,7 @@ kubectl describe service <name>
 kubectl get events --field-selector involvedObject.kind=Service
 kubectl get events --field-selector type=Normal|Warning
 kubectl get events --field-selector reason=RecordReady|RecordDeleted|RecordError
+kubectl get events --field-selector reportingComponent=external-dns
 ```
 
 Or integrate with tools like:
@@ -105,36 +109,14 @@ sequenceDiagram
 - Events are ephemeral (default retention is ~1 hour).
 - They are best-effort and not guaranteed to be delivered or stored long-term.
 - Not a substitute for logging or metrics, but complementary.
+- `RecordDeleted` events carry no UID, so `kubectl describe` misses them; use `kubectl get events -n <namespace>`.
+  `unstructured` source kinds are lowercase (e.g. `virtualmachineinstance`).
+  Records without a registry `resource` label (e.g. `--registry=noop`) emit none.
 
 ## Supported Sources
 
-Events are emitted for all sources that External-DNS supports. The following table lists the sources and whether they currently emit events.
-If a source does not emit events, it may in the future.
+Events are emitted for all sources that External-DNS supports. Event support is being rolled out
+progressively — if a source does not yet emit events, it may in the future.
 
-| Source                 | Supported |
-|:-----------------------|:---------:|
-| `ambassador-host`      |           |
-| `cloudfoundry`         |           |
-| `connector`            |           |
-| `contour-httpproxy`    |           |
-| `crd`                  |           |
-| `empty`                |           |
-| `f5-transportserver`   |           |
-| `f5-virtualserver`     |           |
-| `fake`                 |     ✅    |
-| `gateway-grpcroute`    |           |
-| `gateway-httproute`    |           |
-| `gateway-tcproute`     |           |
-| `gateway-tlsroute`     |           |
-| `gateway-udproute`     |           |
-| `gloo-proxy`           |           |
-| `ingress`              |           |
-| `istio-gateway`        |           |
-| `istio-virtualservice` |           |
-| `kong-tcpingress`      |           |
-| `node`                 |           |
-| `openshift-route`      |           |
-| `pod`                  |           |
-| `service`              |           |
-| `skipper-routegroup`   |           |
-| `traefik-proxy`        |           |
+See the [sources reference](../sources/index.md#available-sources) for the full list and
+per-source event support status.

@@ -29,7 +29,7 @@ import (
 
 type dummyTransport struct{}
 
-func (d *dummyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (d *dummyTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("dummy error")
 }
 
@@ -73,7 +73,7 @@ func TestCancelRequest(t *testing.T) {
 			request:            &http.Request{},
 		},
 	} {
-		t.Run(tt.title, func(t *testing.T) {
+		t.Run(tt.title, func(_ *testing.T) {
 			tt.customRoundTripper.CancelRequest(tt.request)
 		})
 	}
@@ -146,9 +146,9 @@ func TestRoundTrip(t *testing.T) {
 			resp, err := customRoundTripper.RoundTrip(req)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 
 			assert.Equal(t, tt.expectedResponse, resp)

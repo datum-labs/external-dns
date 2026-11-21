@@ -17,323 +17,174 @@ limitations under the License.
 package source
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/json"
 	"fmt"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
-	"sort"
-	"strings"
-	"sync"
-	"text/template"
-	"time"
 
 	log "github.com/sirupsen/logrus"
+	rgv1 "github.com/szuecs/routegroup-client/apis/zalando.org/v1"
+	rgversioned "github.com/szuecs/routegroup-client/client/clientset/versioned"
+	rginformers "github.com/szuecs/routegroup-client/client/informers/externalversions"
+	rginformersv1 "github.com/szuecs/routegroup-client/client/informers/externalversions/zalando.org/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/pkg/events"
 	"sigs.k8s.io/external-dns/source/annotations"
-	"sigs.k8s.io/external-dns/source/fqdn"
+	"sigs.k8s.io/external-dns/source/informers"
+	"sigs.k8s.io/external-dns/source/template"
+	"sigs.k8s.io/external-dns/source/types"
 )
 
-const (
-	defaultIdleConnTimeout = 30 * time.Second
-	// DefaultRoutegroupVersion is the default version for route groups.
-	DefaultRoutegroupVersion     = "zalando.org/v1"
-	routeGroupListResource       = "/apis/%s/routegroups"
-	routeGroupNamespacedResource = "/apis/%s/namespaces/%s/routegroups"
-)
-
+// +externaldns:source:name=skipper-routegroup
+// +externaldns:source:category=Ingress Controllers
+// +externaldns:source:description=Creates DNS entries from Skipper RouteGroup resources
+// +externaldns:source:resources=RouteGroup.zalando.org
+// +externaldns:source:filters=annotation,label
+// +externaldns:source:namespace=all,single
+// +externaldns:source:fqdn-template=true
+// +externaldns:source:provider-specific=true
+// +externaldns:source:events=true
 type routeGroupSource struct {
-	cli                      routeGroupListClient
-	apiServer                string
-	namespace                string
-	apiEndpoint              string
-	annotationFilter         string
-	fqdnTemplate             *template.Template
-	combineFQDNAnnotation    bool
+	templateEngine           template.Engine
 	ignoreHostnameAnnotation bool
+	rgInformer               rginformersv1.RouteGroupInformer
 }
 
-// for testing
-type routeGroupListClient interface {
-	getRouteGroupList(string) (*routeGroupList, error)
+// routeGroupWrapper adds a Metadata() accessor to *rgv1.RouteGroup so that
+// fqdn templates using {{.Metadata.Name}} continue to work alongside the
+// canonical {{.Name}} form.
+//
+// Deprecated: use top-level fields directly (e.g. {{.Name}} instead of {{.Metadata.Name}}).
+type routeGroupWrapper struct {
+	*rgv1.RouteGroup
 }
 
-type routeGroupClient struct {
-	mu        sync.Mutex
-	quit      chan struct{}
-	client    *http.Client
-	token     string
-	tokenFile string
-}
-
-func newRouteGroupClient(token, tokenPath string, timeout time.Duration) *routeGroupClient {
-	const (
-		tokenFile  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-		rootCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	)
-	if tokenPath != "" {
-		tokenPath = tokenFile
-	}
-
-	tr := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   timeout,
-			KeepAlive: 30 * time.Second,
-			DualStack: true,
-		}).DialContext,
-		TLSHandshakeTimeout:   3 * time.Second,
-		ResponseHeaderTimeout: timeout,
-		IdleConnTimeout:       defaultIdleConnTimeout,
-		MaxIdleConns:          5,
-		MaxIdleConnsPerHost:   5,
-	}
-	cli := &routeGroupClient{
-		client: &http.Client{
-			Transport: tr,
-		},
-		quit:      make(chan struct{}),
-		tokenFile: tokenPath,
-		token:     token,
-	}
-
-	go func() {
-		for {
-			select {
-			case <-time.After(tr.IdleConnTimeout):
-				tr.CloseIdleConnections()
-				cli.updateToken()
-			case <-cli.quit:
-				return
-			}
-		}
-	}()
-
-	// in cluster config, errors are treated as not running in cluster
-	cli.updateToken()
-
-	// cluster internal use custom CA to reach TLS endpoint
-	rootCA, err := os.ReadFile(rootCAFile)
-	if err != nil {
-		return cli
-	}
-	certPool := x509.NewCertPool()
-	if !certPool.AppendCertsFromPEM(rootCA) {
-		return cli
-	}
-
-	tr.TLSClientConfig = &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    certPool,
-	}
-
-	return cli
-}
-
-func (cli *routeGroupClient) updateToken() {
-	if cli.tokenFile == "" {
-		return
-	}
-
-	token, err := os.ReadFile(cli.tokenFile)
-	if err != nil {
-		log.Errorf("Failed to read token from file (%s): %v", cli.tokenFile, err)
-		return
-	}
-
-	cli.mu.Lock()
-	cli.token = string(token)
-	cli.mu.Unlock()
-}
-
-func (cli *routeGroupClient) getToken() string {
-	cli.mu.Lock()
-	defer cli.mu.Unlock()
-	return cli.token
-}
-
-func (cli *routeGroupClient) getRouteGroupList(url string) (*routeGroupList, error) {
-	resp, err := cli.get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get routegroup list from %s, got: %s", url, resp.Status)
-	}
-
-	var rgs routeGroupList
-	err = json.NewDecoder(resp.Body).Decode(&rgs)
-	if err != nil {
-		return nil, err
-	}
-
-	return &rgs, nil
-}
-
-func (cli *routeGroupClient) get(url string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	return cli.do(req)
-}
-
-func (cli *routeGroupClient) do(req *http.Request) (*http.Response, error) {
-	if tok := cli.getToken(); tok != "" && req.Header.Get("Authorization") == "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	return cli.client.Do(req)
+// Metadata returns the ObjectMeta for backward-compatible template access.
+//
+// Deprecated: use top-level fields directly (e.g. {{.Name}} instead of {{.Metadata.Name}}).
+func (w *routeGroupWrapper) Metadata() *metav1.ObjectMeta {
+	return &w.ObjectMeta
 }
 
 // NewRouteGroupSource creates a new routeGroupSource with the given config.
-func NewRouteGroupSource(timeout time.Duration, token, tokenPath, apiServerURL, namespace, annotationFilter, fqdnTemplate, routegroupVersion string, combineFqdnAnnotation, ignoreHostnameAnnotation bool) (Source, error) {
-	tmpl, err := fqdn.ParseTemplate(fqdnTemplate)
-	if err != nil {
+func NewRouteGroupSource(ctx context.Context, client rgversioned.Interface, cfg *Config) (Source, error) {
+	namespace := cfg.Namespace()
+	// The reflector retries a failing List until WaitForCacheSync gives up a minute later,
+	// so probe up front: a missing CRD should fail startup at once, and say so.
+	if _, err := client.ZalandoV1().RouteGroups(namespace).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("--source=skipper-routegroup requires the RouteGroup CRD (routegroups.zalando.org) to be installed: %w", err)
+		}
+		return nil, fmt.Errorf("failed to list RouteGroups: %w", err)
+	}
+
+	informerFactory := rginformers.NewSharedInformerFactoryWithOptions(
+		client, 0,
+		rginformers.WithNamespace(namespace),
+	)
+	rgInformer := informerFactory.Zalando().V1().RouteGroups()
+
+	informers.MustAddIndexers(rgInformer.Informer(), informers.IndexerWithOptions[*rgv1.RouteGroup](
+		informers.IndexSelectorWithAnnotationFilter(cfg.AnnotationFilter),
+		informers.IndexSelectorWithLabelSelector(cfg.LabelFilter),
+		informers.IndexSelectorWithConditions(annotations.IsControllerMatch[*rgv1.RouteGroup]),
+	))
+
+	informers.MustSetTransform(rgInformer.Informer(), informers.TransformerWithOptions[*rgv1.RouteGroup](
+		informers.TransformRemoveManagedFields(),
+		informers.TransformRemoveLastAppliedConfig(),
+	))
+
+	// Add default resource event handlers to properly initialize informer.
+	informers.MustAddEventHandler(rgInformer.Informer(), informers.DefaultEventHandler())
+
+	informerFactory.Start(ctx.Done())
+
+	// wait for the local cache to be populated.
+	if err := informers.WaitForCacheSync(ctx, informerFactory); err != nil {
 		return nil, err
 	}
 
-	if routegroupVersion == "" {
-		routegroupVersion = DefaultRoutegroupVersion
-	}
-	cli := newRouteGroupClient(token, tokenPath, timeout)
-
-	u, err := url.Parse(apiServerURL)
-	if err != nil {
-		return nil, err
-	}
-
-	apiServer := u.String()
-	// strip port if well known port, because of TLS certificate match
-	if u.Scheme == "https" && u.Port() == "443" {
-		// correctly handle IPv6 addresses by keeping surrounding `[]`.
-		apiServer = "https://" + strings.TrimSuffix(u.Host, ":443")
-	}
-
-	sc := &routeGroupSource{
-		cli:                      cli,
-		apiServer:                apiServer,
-		namespace:                namespace,
-		apiEndpoint:              apiServer + fmt.Sprintf(routeGroupListResource, routegroupVersion),
-		annotationFilter:         annotationFilter,
-		fqdnTemplate:             tmpl,
-		combineFQDNAnnotation:    combineFqdnAnnotation,
-		ignoreHostnameAnnotation: ignoreHostnameAnnotation,
-	}
-	if namespace != "" {
-		sc.apiEndpoint = apiServer + fmt.Sprintf(routeGroupNamespacedResource, routegroupVersion, namespace)
-	}
-
-	log.Infoln("Created route group source")
-	return sc, nil
+	return &routeGroupSource{
+		templateEngine:           cfg.TemplateEngine,
+		ignoreHostnameAnnotation: cfg.IgnoreHostnameAnnotation,
+		rgInformer:               rgInformer,
+	}, nil
 }
 
-// AddEventHandler for routegroup is currently a no op, because we do not implement caching, yet.
-func (sc *routeGroupSource) AddEventHandler(ctx context.Context, handler func()) {}
+// AddEventHandler adds an event handler that can be triggered on RouteGroup changes.
+func (sc *routeGroupSource) AddEventHandler(_ context.Context, handler func()) {
+	log.Debug("Adding event handler for routegroup")
+	informers.MustAddEventHandler(sc.rgInformer.Informer(), eventHandlerFunc(handler))
+}
 
 // Endpoints returns endpoint objects for each host-target combination that should be processed.
 // Retrieves all routeGroup resources on all namespaces.
 // Logic is ported from ingress without fqdnTemplate
-func (sc *routeGroupSource) Endpoints(ctx context.Context) ([]*endpoint.Endpoint, error) {
-	rgList, err := sc.cli.getRouteGroupList(sc.apiEndpoint)
-	if err != nil {
-		log.Errorf("Failed to get RouteGroup list: %v", err)
-		return nil, err
-	}
-	rgList, err = sc.filterByAnnotations(rgList)
-	if err != nil {
-		return nil, err
-	}
+func (sc *routeGroupSource) Endpoints(_ context.Context) ([]*endpoint.Endpoint, error) {
+	routeGroups := informers.ListIndexed[*rgv1.RouteGroup](sc.rgInformer.Informer().GetIndexer())
 
-	endpoints := []*endpoint.Endpoint{}
-	for _, rg := range rgList.Items {
-		// Check controller annotation to see if we are responsible.
-		controller, ok := rg.Metadata.Annotations[annotations.ControllerKey]
-		if ok && controller != annotations.ControllerValue {
-			log.Debugf("Skipping routegroup %s/%s because controller value does not match, found: %s, required: %s",
-				rg.Metadata.Namespace, rg.Metadata.Name, controller, annotations.ControllerValue)
-			continue
-		}
-
+	var endpoints []*endpoint.Endpoint
+	for _, rg := range routeGroups {
 		eps := sc.endpointsFromRouteGroup(rg)
 
-		if (sc.combineFQDNAnnotation || len(eps) == 0) && sc.fqdnTemplate != nil {
-			tmplEndpoints, err := sc.endpointsFromTemplate(rg)
-			if err != nil {
-				return nil, err
-			}
-
-			if sc.combineFQDNAnnotation {
-				eps = append(eps, tmplEndpoints...)
-			} else {
-				eps = tmplEndpoints
-			}
+		var err error
+		eps, err = sc.templateEngine.CombineWithEndpoints(
+			eps,
+			func() ([]*endpoint.Endpoint, error) { return sc.endpointsFromTemplate(rg) },
+		)
+		if err != nil {
+			return nil, err
 		}
 
-		if len(eps) == 0 {
-			log.Debugf("No endpoints could be generated from routegroup %s/%s", rg.Metadata.Namespace, rg.Metadata.Name)
+		if endpoint.IsEmptyEndpoints(eps, types.SkipperRouteGroup, rg) {
 			continue
 		}
 
-		log.Debugf("Endpoints generated from ingress: %s/%s: %v", rg.Metadata.Namespace, rg.Metadata.Name, eps)
+		endpoint.AttachRefObject(eps, events.NewObjectReference(rg, types.SkipperRouteGroup))
+
+		log.Debugf("Endpoints generated from routegroup: %s/%s: %v", rg.Namespace, rg.Name, eps)
 		endpoints = append(endpoints, eps...)
 	}
 
-	for _, ep := range endpoints {
-		sort.Sort(ep.Targets)
-	}
-
-	return endpoints, nil
+	return endpoint.MergeEndpoints(endpoints), nil
 }
 
-func (sc *routeGroupSource) endpointsFromTemplate(rg *routeGroup) ([]*endpoint.Endpoint, error) {
-	// Process the whole template string
-	var buf bytes.Buffer
-	err := sc.fqdnTemplate.Execute(&buf, rg)
+func (sc *routeGroupSource) endpointsFromTemplate(rg *rgv1.RouteGroup) ([]*endpoint.Endpoint, error) {
+	hostnames, err := sc.templateEngine.ExecFQDN(&routeGroupWrapper{rg})
 	if err != nil {
-		return nil, fmt.Errorf("failed to apply template on routegroup %s/%s: %w", rg.Metadata.Namespace, rg.Metadata.Name, err)
+		return nil, err
 	}
 
-	hostnames := buf.String()
-
-	resource := fmt.Sprintf("routegroup/%s/%s", rg.Metadata.Namespace, rg.Metadata.Name)
+	resource := fmt.Sprintf("routegroup/%s/%s", rg.Namespace, rg.Name)
 
 	// error handled in endpointsFromRouteGroup(), otherwise duplicate log
-	ttl := annotations.TTLFromAnnotations(rg.Metadata.Annotations, resource)
+	ttl := annotations.TTLFromAnnotations(rg.Annotations, resource)
 
-	targets := annotations.TargetsFromTargetAnnotation(rg.Metadata.Annotations)
+	targets := annotations.TargetsFromTargetAnnotation(rg.Annotations)
 
 	if len(targets) == 0 {
 		targets = targetsFromRouteGroupStatus(rg.Status)
 	}
 
-	providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(rg.Metadata.Annotations)
+	providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(rg.Annotations)
 
 	var endpoints []*endpoint.Endpoint
-	// splits the FQDN template and removes the trailing periods
-	hostnameList := strings.Split(strings.ReplaceAll(hostnames, " ", ""), ",")
-	for _, hostname := range hostnameList {
-		hostname = strings.TrimSuffix(hostname, ".")
-		endpoints = append(endpoints, EndpointsForHostname(hostname, targets, ttl, providerSpecific, setIdentifier, resource)...)
+	for _, hostname := range hostnames {
+		endpoints = append(endpoints, endpoint.EndpointsForHostname(hostname, targets, ttl, providerSpecific, setIdentifier, resource)...)
 	}
 	return endpoints, nil
 }
 
-// annotation logic ported from source/ingress.go without Spec.TLS part, because it'S not supported in RouteGroup
-func (sc *routeGroupSource) endpointsFromRouteGroup(rg *routeGroup) []*endpoint.Endpoint {
+func (sc *routeGroupSource) endpointsFromRouteGroup(rg *rgv1.RouteGroup) []*endpoint.Endpoint {
 	endpoints := []*endpoint.Endpoint{}
 
-	resource := fmt.Sprintf("routegroup/%s/%s", rg.Metadata.Namespace, rg.Metadata.Name)
+	resource := fmt.Sprintf("routegroup/%s/%s", rg.Namespace, rg.Name)
 
-	ttl := annotations.TTLFromAnnotations(rg.Metadata.Annotations, resource)
+	ttl := annotations.TTLFromAnnotations(rg.Annotations, resource)
 
-	targets := annotations.TargetsFromTargetAnnotation(rg.Metadata.Annotations)
+	targets := annotations.TargetsFromTargetAnnotation(rg.Annotations)
 	if len(targets) == 0 {
 		for _, lb := range rg.Status.LoadBalancer.RouteGroup {
 			if lb.IP != "" {
@@ -345,50 +196,26 @@ func (sc *routeGroupSource) endpointsFromRouteGroup(rg *routeGroup) []*endpoint.
 		}
 	}
 
-	providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(rg.Metadata.Annotations)
+	providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(rg.Annotations)
 
 	for _, src := range rg.Spec.Hosts {
 		if src == "" {
 			continue
 		}
-		endpoints = append(endpoints, EndpointsForHostname(src, targets, ttl, providerSpecific, setIdentifier, resource)...)
+		endpoints = append(endpoints, endpoint.EndpointsForHostname(src, targets, ttl, providerSpecific, setIdentifier, resource)...)
 	}
 
 	// Skip endpoints if we do not want entries from annotations
 	if !sc.ignoreHostnameAnnotation {
-		hostnameList := annotations.HostnamesFromAnnotations(rg.Metadata.Annotations)
+		hostnameList := annotations.HostnamesFromAnnotations(rg.Annotations)
 		for _, hostname := range hostnameList {
-			endpoints = append(endpoints, EndpointsForHostname(hostname, targets, ttl, providerSpecific, setIdentifier, resource)...)
+			endpoints = append(endpoints, endpoint.EndpointsForHostname(hostname, targets, ttl, providerSpecific, setIdentifier, resource)...)
 		}
 	}
 	return endpoints
 }
 
-// filterByAnnotations filters a list of routeGroupList by a given annotation selector.
-func (sc *routeGroupSource) filterByAnnotations(rgs *routeGroupList) (*routeGroupList, error) {
-	selector, err := getLabelSelector(sc.annotationFilter)
-	if err != nil {
-		return nil, err
-	}
-
-	// empty filter returns original list
-	if selector.Empty() {
-		return rgs, nil
-	}
-
-	var filteredList []*routeGroup
-	for _, rg := range rgs.Items {
-		// include ingress if its annotations match the selector
-		if matchLabelSelector(selector, rg.Metadata.Annotations) {
-			filteredList = append(filteredList, rg)
-		}
-	}
-	rgs.Items = filteredList
-
-	return rgs, nil
-}
-
-func targetsFromRouteGroupStatus(status routeGroupStatus) endpoint.Targets {
+func targetsFromRouteGroupStatus(status rgv1.RouteGroupStatus) endpoint.Targets {
 	var targets endpoint.Targets
 
 	for _, lb := range status.LoadBalancer.RouteGroup {
@@ -401,45 +228,4 @@ func targetsFromRouteGroupStatus(status routeGroupStatus) endpoint.Targets {
 	}
 
 	return targets
-}
-
-type routeGroupList struct {
-	Kind       string                 `json:"kind"`
-	APIVersion string                 `json:"apiVersion"`
-	Metadata   routeGroupListMetadata `json:"metadata"`
-	Items      []*routeGroup          `json:"items"`
-}
-
-type routeGroupListMetadata struct {
-	SelfLink        string `json:"selfLink"`
-	ResourceVersion string `json:"resourceVersion"`
-}
-
-type routeGroup struct {
-	Metadata itemMetadata     `json:"metadata"`
-	Spec     routeGroupSpec   `json:"spec"`
-	Status   routeGroupStatus `json:"status"`
-}
-
-type itemMetadata struct {
-	Namespace   string            `json:"namespace"`
-	Name        string            `json:"name"`
-	Annotations map[string]string `json:"annotations"`
-}
-
-type routeGroupSpec struct {
-	Hosts []string `json:"hosts"`
-}
-
-type routeGroupStatus struct {
-	LoadBalancer routeGroupLoadBalancerStatus `json:"loadBalancer"`
-}
-
-type routeGroupLoadBalancerStatus struct {
-	RouteGroup []routeGroupLoadBalancer `json:"routeGroup"`
-}
-
-type routeGroupLoadBalancer struct {
-	IP       string `json:"ip,omitempty"`
-	Hostname string `json:"hostname,omitempty"`
 }

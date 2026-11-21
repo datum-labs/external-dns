@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/pkg/version"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
 )
@@ -50,12 +51,12 @@ var (
 		Name: &zoneNameBaz,
 	}
 	testGlobalZoneSummaryFoo = dns.ZoneSummary{
-		Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-		Name: common.String("foo.com"),
+		Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+		Name: new("foo.com"),
 	}
 	testGlobalZoneSummaryBar = dns.ZoneSummary{
-		Id:   common.String("ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"),
-		Name: common.String("bar.com"),
+		Id:   new("ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"),
+		Name: new("bar.com"),
 	}
 )
 
@@ -74,7 +75,7 @@ func (c *mockOCIDNSClient) ListZones(_ context.Context, request dns.ListZonesReq
 	if request.Page == nil || *request.Page == "0" {
 		return dns.ListZonesResponse{
 			Items:       buildZoneResponseItems(request.Scope, []dns.ZoneSummary{testPrivateZoneSummaryBaz}, []dns.ZoneSummary{testGlobalZoneSummaryFoo}),
-			OpcNextPage: common.String("1"),
+			OpcNextPage: new("1"),
 		}, nil
 	}
 	return dns.ListZonesResponse{
@@ -82,7 +83,7 @@ func (c *mockOCIDNSClient) ListZones(_ context.Context, request dns.ListZonesReq
 	}, nil
 }
 
-func (c *mockOCIDNSClient) GetZoneRecords(ctx context.Context, request dns.GetZoneRecordsRequest) (dns.GetZoneRecordsResponse, error) {
+func (c *mockOCIDNSClient) GetZoneRecords(_ context.Context, request dns.GetZoneRecordsRequest) (dns.GetZoneRecordsResponse, error) {
 	var response dns.GetZoneRecordsResponse
 	var err error
 	if request.ZoneNameOrId == nil {
@@ -93,39 +94,39 @@ func (c *mockOCIDNSClient) GetZoneRecords(ctx context.Context, request dns.GetZo
 	case "ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959":
 		if request.Page == nil || *request.Page == "0" {
 			response.Items = []dns.Record{{
-				Domain: common.String("foo.foo.com"),
-				Rdata:  common.String("127.0.0.1"),
+				Domain: new("foo.foo.com"),
+				Rdata:  new("127.0.0.1"),
 				Rtype:  common.String(endpoint.RecordTypeA),
-				Ttl:    common.Int(defaultTTL),
+				Ttl:    new(defaultTTL),
 			}, {
-				Domain: common.String("foo.foo.com"),
-				Rdata:  common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
+				Domain: new("foo.foo.com"),
+				Rdata:  new("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 				Rtype:  common.String(endpoint.RecordTypeTXT),
-				Ttl:    common.Int(defaultTTL),
+				Ttl:    new(defaultTTL),
 			}}
-			response.OpcNextPage = common.String("1")
+			response.OpcNextPage = new("1")
 		} else {
 			response.Items = []dns.Record{{
-				Domain: common.String("bar.foo.com"),
-				Rdata:  common.String("bar.com."),
+				Domain: new("bar.foo.com"),
+				Rdata:  new("bar.com."),
 				Rtype:  common.String(endpoint.RecordTypeCNAME),
-				Ttl:    common.Int(defaultTTL),
+				Ttl:    new(defaultTTL),
 			}}
 		}
 	case "ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404":
 		if request.Page == nil || *request.Page == "0" {
 			response.Items = []dns.Record{{
-				Domain: common.String("foo.bar.com"),
-				Rdata:  common.String("127.0.0.1"),
+				Domain: new("foo.bar.com"),
+				Rdata:  new("127.0.0.1"),
 				Rtype:  common.String(endpoint.RecordTypeA),
-				Ttl:    common.Int(defaultTTL),
+				Ttl:    new(defaultTTL),
 			}}
 		}
 	}
 	return response, err
 }
 
-func (c *mockOCIDNSClient) PatchZoneRecords(_ context.Context, request dns.PatchZoneRecordsRequest) (dns.PatchZoneRecordsResponse, error) {
+func (c *mockOCIDNSClient) PatchZoneRecords(_ context.Context, _ dns.PatchZoneRecordsRequest) (dns.PatchZoneRecordsResponse, error) {
 	return dns.PatchZoneRecordsResponse{}, nil
 }
 
@@ -225,7 +226,7 @@ hKRtDhmSdWBo3tJK12RrAe4t7CUe8gMgTvU7ExlcA3xQkseFPx9K
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewOCIProvider(
+			provider, err := newProvider(
 				tc.config,
 				endpoint.NewDomainFilter([]string{"com"}),
 				provider.NewZoneIDFilter([]string{""}),
@@ -234,6 +235,10 @@ hKRtDhmSdWBo3tJK12RrAe4t7CUe8gMgTvU7ExlcA3xQkseFPx9K
 			)
 			if err == nil {
 				require.NoError(t, err)
+				client, ok := provider.client.(dns.DnsClient)
+				require.True(t, ok)
+				require.Contains(t, client.UserAgent, "Oracle-GoSDK/")
+				require.True(t, strings.HasSuffix(client.UserAgent, version.UserAgent()))
 			} else {
 				// have to use prefix testing because the expected instance-principal error strings vary after a known prefix
 				require.Truef(t, strings.HasPrefix(err.Error(), tc.err.Error()), "observed: %s", err.Error())
@@ -291,8 +296,8 @@ func TestOCIZones(t *testing.T) {
 			zoneScope:    "GLOBAL",
 			expected: map[string]dns.ZoneSummary{
 				fooZoneId: {
-					Id:   common.String(fooZoneId),
-					Name: common.String("foo.com"),
+					Id:   new(fooZoneId),
+					Name: new("foo.com"),
 				},
 			},
 		},
@@ -303,8 +308,8 @@ func TestOCIZones(t *testing.T) {
 			zoneScope:    "GLOBAL",
 			expected: map[string]dns.ZoneSummary{
 				fooZoneId: {
-					Id:   common.String(fooZoneId),
-					Name: common.String("foo.com"),
+					Id:   new(fooZoneId),
+					Name: new("foo.com"),
 				},
 			},
 		},
@@ -312,7 +317,7 @@ func TestOCIZones(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := newOCIProvider(&mockOCIDNSClient{}, tc.domainFilter, tc.zoneIDFilter, tc.zoneScope, false)
-			zones, err := provider.zones(context.Background())
+			zones, err := provider.zones(t.Context())
 			require.NoError(t, err)
 			validateOCIZones(t, zones, tc.expected)
 		})
@@ -357,7 +362,7 @@ func TestOCIRecords(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := newOCIProvider(&mockOCIDNSClient{}, tc.domainFilter, tc.zoneIDFilter, "", false)
-			endpoints, err := provider.Records(context.Background())
+			endpoints, err := provider.Records(t.Context())
 			require.NoError(t, err)
 			require.ElementsMatch(t, tc.expected, endpoints)
 		})
@@ -380,10 +385,10 @@ func TestNewRecordOperation(t *testing.T) {
 				endpoint.TTL(defaultTTL),
 				"127.0.0.1"),
 			expected: dns.RecordOperation{
-				Domain:    common.String("foo.foo.com"),
-				Rdata:     common.String("127.0.0.1"),
-				Rtype:     common.String("A"),
-				Ttl:       common.Int(300),
+				Domain:    new("foo.foo.com"),
+				Rdata:     new("127.0.0.1"),
+				Rtype:     new("A"),
+				Ttl:       new(300),
 				Operation: dns.RecordOperationOperationAdd,
 			},
 		}, {
@@ -395,10 +400,10 @@ func TestNewRecordOperation(t *testing.T) {
 				endpoint.TTL(defaultTTL),
 				"heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 			expected: dns.RecordOperation{
-				Domain:    common.String("foo.foo.com"),
-				Rdata:     common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
-				Rtype:     common.String("TXT"),
-				Ttl:       common.Int(300),
+				Domain:    new("foo.foo.com"),
+				Rdata:     new("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
+				Rtype:     new("TXT"),
+				Ttl:       new(300),
 				Operation: dns.RecordOperationOperationAdd,
 			},
 		}, {
@@ -410,10 +415,10 @@ func TestNewRecordOperation(t *testing.T) {
 				endpoint.TTL(defaultTTL),
 				"bar.com."),
 			expected: dns.RecordOperation{
-				Domain:    common.String("foo.foo.com"),
-				Rdata:     common.String("bar.com."),
-				Rtype:     common.String("CNAME"),
-				Ttl:       common.Int(300),
+				Domain:    new("foo.foo.com"),
+				Rdata:     new("bar.com."),
+				Rtype:     new("CNAME"),
+				Ttl:       new(300),
 				Operation: dns.RecordOperationOperationAdd,
 			},
 		},
@@ -438,46 +443,46 @@ func TestOperationsByZone(t *testing.T) {
 			name: "basic",
 			zones: map[string]dns.ZoneSummary{
 				"foo": {
-					Id:   common.String("foo"),
-					Name: common.String("foo.com"),
+					Id:   new("foo"),
+					Name: new("foo.com"),
 				},
 				"bar": {
-					Id:   common.String("bar"),
-					Name: common.String("bar.com"),
+					Id:   new("bar"),
+					Name: new("bar.com"),
 				},
 			},
 			ops: []dns.RecordOperation{
 				{
-					Domain:    common.String("foo.foo.com"),
-					Rdata:     common.String("127.0.0.1"),
-					Rtype:     common.String("A"),
-					Ttl:       common.Int(300),
+					Domain:    new("foo.foo.com"),
+					Rdata:     new("127.0.0.1"),
+					Rtype:     new("A"),
+					Ttl:       new(300),
 					Operation: dns.RecordOperationOperationAdd,
 				},
 				{
-					Domain:    common.String("foo.bar.com"),
-					Rdata:     common.String("127.0.0.1"),
-					Rtype:     common.String("A"),
-					Ttl:       common.Int(300),
+					Domain:    new("foo.bar.com"),
+					Rdata:     new("127.0.0.1"),
+					Rtype:     new("A"),
+					Ttl:       new(300),
 					Operation: dns.RecordOperationOperationAdd,
 				},
 			},
 			expected: map[string][]dns.RecordOperation{
 				"foo": {
 					{
-						Domain:    common.String("foo.foo.com"),
-						Rdata:     common.String("127.0.0.1"),
-						Rtype:     common.String("A"),
-						Ttl:       common.Int(300),
+						Domain:    new("foo.foo.com"),
+						Rdata:     new("127.0.0.1"),
+						Rtype:     new("A"),
+						Ttl:       new(300),
 						Operation: dns.RecordOperationOperationAdd,
 					},
 				},
 				"bar": {
 					{
-						Domain:    common.String("foo.bar.com"),
-						Rdata:     common.String("127.0.0.1"),
-						Rtype:     common.String("A"),
-						Ttl:       common.Int(300),
+						Domain:    new("foo.bar.com"),
+						Rdata:     new("127.0.0.1"),
+						Rtype:     new("A"),
+						Ttl:       new(300),
 						Operation: dns.RecordOperationOperationAdd,
 					},
 				},
@@ -486,30 +491,30 @@ func TestOperationsByZone(t *testing.T) {
 			name: "does_not_include_zones_with_no_changes",
 			zones: map[string]dns.ZoneSummary{
 				"foo": {
-					Id:   common.String("foo"),
-					Name: common.String("foo.com"),
+					Id:   new("foo"),
+					Name: new("foo.com"),
 				},
 				"bar": {
-					Id:   common.String("bar"),
-					Name: common.String("bar.com"),
+					Id:   new("bar"),
+					Name: new("bar.com"),
 				},
 			},
 			ops: []dns.RecordOperation{
 				{
-					Domain:    common.String("foo.foo.com"),
-					Rdata:     common.String("127.0.0.1"),
-					Rtype:     common.String("A"),
-					Ttl:       common.Int(300),
+					Domain:    new("foo.foo.com"),
+					Rdata:     new("127.0.0.1"),
+					Rtype:     new("A"),
+					Ttl:       new(300),
 					Operation: dns.RecordOperationOperationAdd,
 				},
 			},
 			expected: map[string][]dns.RecordOperation{
 				"foo": {
 					{
-						Domain:    common.String("foo.foo.com"),
-						Rdata:     common.String("127.0.0.1"),
-						Rtype:     common.String("A"),
-						Ttl:       common.Int(300),
+						Domain:    new("foo.foo.com"),
+						Rdata:     new("127.0.0.1"),
+						Rtype:     new("A"),
+						Ttl:       new(300),
 						Operation: dns.RecordOperationOperationAdd,
 					},
 				},
@@ -592,7 +597,7 @@ func sortEndpointTargets(endpoints []*endpoint.Endpoint) {
 	}
 }
 
-func (c *mutableMockOCIDNSClient) PatchZoneRecords(ctx context.Context, request dns.PatchZoneRecordsRequest) (dns.PatchZoneRecordsResponse, error) {
+func (c *mutableMockOCIDNSClient) PatchZoneRecords(_ context.Context, request dns.PatchZoneRecordsRequest) (dns.PatchZoneRecordsResponse, error) {
 	var response dns.PatchZoneRecordsResponse
 	if request.ZoneNameOrId == nil {
 		return response, errors.New("no name or id")
@@ -631,32 +636,32 @@ func (c *mutableMockOCIDNSClient) PatchZoneRecords(ctx context.Context, request 
 // right...?
 func TestMutableMockOCIDNSClient(t *testing.T) {
 	zones := []dns.ZoneSummary{{
-		Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-		Name: common.String("foo.com"),
+		Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+		Name: new("foo.com"),
 	}}
 	records := map[string][]dns.Record{
 		"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-			Domain: common.String("foo.foo.com"),
-			Rdata:  common.String("127.0.0.1"),
+			Domain: new("foo.foo.com"),
+			Rdata:  new("127.0.0.1"),
 			Rtype:  common.String(endpoint.RecordTypeA),
-			Ttl:    common.Int(defaultTTL),
+			Ttl:    new(defaultTTL),
 		}, {
-			Domain: common.String("foo.foo.com"),
-			Rdata:  common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
+			Domain: new("foo.foo.com"),
+			Rdata:  new("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 			Rtype:  common.String(endpoint.RecordTypeTXT),
-			Ttl:    common.Int(defaultTTL),
+			Ttl:    new(defaultTTL),
 		}},
 	}
 	client := newMutableMockOCIDNSClient(zones, records)
 
 	// First ListZones.
-	zonesResponse, err := client.ListZones(context.Background(), dns.ListZonesRequest{})
+	zonesResponse, err := client.ListZones(t.Context(), dns.ListZonesRequest{})
 	require.NoError(t, err)
 	require.Len(t, zonesResponse.Items, 1)
 	require.Equal(t, zonesResponse.Items, zones)
 
 	// GetZoneRecords for that zone.
-	recordsResponse, err := client.GetZoneRecords(context.Background(), dns.GetZoneRecordsRequest{
+	recordsResponse, err := client.GetZoneRecords(t.Context(), dns.GetZoneRecordsRequest{
 		ZoneNameOrId: zones[0].Id,
 	})
 	require.NoError(t, err)
@@ -664,22 +669,20 @@ func TestMutableMockOCIDNSClient(t *testing.T) {
 	require.ElementsMatch(t, recordsResponse.Items, records["ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"])
 
 	// Remove the A record.
-	_, err = client.PatchZoneRecords(context.Background(), dns.PatchZoneRecordsRequest{
-		ZoneNameOrId: common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-		PatchZoneRecordsDetails: dns.PatchZoneRecordsDetails{
-			Items: []dns.RecordOperation{{
-				Domain:    common.String("foo.foo.com"),
-				Rdata:     common.String("127.0.0.1"),
-				Rtype:     common.String("A"),
-				Ttl:       common.Int(300),
-				Operation: dns.RecordOperationOperationRemove,
-			}},
-		},
+	_, err = client.PatchZoneRecords(t.Context(), dns.PatchZoneRecordsRequest{
+		ZoneNameOrId: new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+		Items: []dns.RecordOperation{{
+			Domain:    new("foo.foo.com"),
+			Rdata:     new("127.0.0.1"),
+			Rtype:     new("A"),
+			Ttl:       new(300),
+			Operation: dns.RecordOperationOperationRemove,
+		}},
 	})
 	require.NoError(t, err)
 
 	// GetZoneRecords again and check the A record was removed.
-	recordsResponse, err = client.GetZoneRecords(context.Background(), dns.GetZoneRecordsRequest{
+	recordsResponse, err = client.GetZoneRecords(t.Context(), dns.GetZoneRecordsRequest{
 		ZoneNameOrId: zones[0].Id,
 	})
 	require.NoError(t, err)
@@ -687,22 +690,20 @@ func TestMutableMockOCIDNSClient(t *testing.T) {
 	require.Equal(t, recordsResponse.Items[0], records["ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"][1])
 
 	// Add the A record back.
-	_, err = client.PatchZoneRecords(context.Background(), dns.PatchZoneRecordsRequest{
-		ZoneNameOrId: common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-		PatchZoneRecordsDetails: dns.PatchZoneRecordsDetails{
-			Items: []dns.RecordOperation{{
-				Domain:    common.String("foo.foo.com"),
-				Rdata:     common.String("127.0.0.1"),
-				Rtype:     common.String("A"),
-				Ttl:       common.Int(300),
-				Operation: dns.RecordOperationOperationAdd,
-			}},
-		},
+	_, err = client.PatchZoneRecords(t.Context(), dns.PatchZoneRecordsRequest{
+		ZoneNameOrId: new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+		Items: []dns.RecordOperation{{
+			Domain:    new("foo.foo.com"),
+			Rdata:     new("127.0.0.1"),
+			Rtype:     new("A"),
+			Ttl:       new(300),
+			Operation: dns.RecordOperationOperationAdd,
+		}},
 	})
 	require.NoError(t, err)
 
 	// GetZoneRecords and check we're back in the original state
-	recordsResponse, err = client.GetZoneRecords(context.Background(), dns.GetZoneRecordsRequest{
+	recordsResponse, err = client.GetZoneRecords(t.Context(), dns.GetZoneRecordsRequest{
 		ZoneNameOrId: zones[0].Id,
 	})
 	require.NoError(t, err)
@@ -724,8 +725,8 @@ func TestOCIApplyChanges(t *testing.T) {
 		{
 			name: "add",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			changes: &plan.Changes{
 				Create: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
@@ -744,20 +745,20 @@ func TestOCIApplyChanges(t *testing.T) {
 		}, {
 			name: "remove",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("127.0.0.1"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}, {
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 					Rtype:  common.String(endpoint.RecordTypeTXT),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -777,15 +778,15 @@ func TestOCIApplyChanges(t *testing.T) {
 		}, {
 			name: "update",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("127.0.0.1"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -811,15 +812,15 @@ func TestOCIApplyChanges(t *testing.T) {
 		}, {
 			name: "dry_run_no_changes",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("127.0.0.1"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -840,25 +841,25 @@ func TestOCIApplyChanges(t *testing.T) {
 		}, {
 			name: "add_remove_update",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("127.0.0.1"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}, {
-					Domain: common.String("car.foo.com"),
-					Rdata:  common.String("bar.com."),
+					Domain: new("car.foo.com"),
+					Rdata:  new("bar.com."),
 					Rtype:  common.String(endpoint.RecordTypeCNAME),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}, {
-					Domain: common.String("bar.foo.com"),
-					Rdata:  common.String("baz.com."),
+					Domain: new("bar.foo.com"),
+					Rdata:  new("baz.com."),
 					Rtype:  common.String(endpoint.RecordTypeCNAME),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -904,8 +905,8 @@ func TestOCIApplyChanges(t *testing.T) {
 		{
 			name: "combine_multi_target",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 
 			changes: &plan.Changes{
@@ -930,20 +931,20 @@ func TestOCIApplyChanges(t *testing.T) {
 		{
 			name: "remove_from_multi_target",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("192.168.1.2"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("192.168.1.2"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}, {
-					Domain: common.String("foo.foo.com"),
-					Rdata:  common.String("192.168.2.5"),
+					Domain: new("foo.foo.com"),
+					Rdata:  new("192.168.2.5"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -963,15 +964,15 @@ func TestOCIApplyChanges(t *testing.T) {
 		{
 			name: "update_multi_target",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("first.foo.com"),
-					Rdata:  common.String("10.77.4.5"),
+					Domain: new("first.foo.com"),
+					Rdata:  new("10.77.4.5"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -998,15 +999,15 @@ func TestOCIApplyChanges(t *testing.T) {
 		{
 			name: "increase_multi_target",
 			zones: []dns.ZoneSummary{{
-				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-				Name: common.String("foo.com"),
+				Id:   new("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: new("foo.com"),
 			}},
 			records: map[string][]dns.Record{
 				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
-					Domain: common.String("first.foo.com"),
-					Rdata:  common.String("10.77.4.5"),
+					Domain: new("first.foo.com"),
+					Rdata:  new("10.77.4.5"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(defaultTTL),
+					Ttl:    new(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
@@ -1037,7 +1038,7 @@ func TestOCIApplyChanges(t *testing.T) {
 				tc.dryRun,
 			)
 
-			ctx := context.Background()
+			ctx := t.Context()
 			err := provider.ApplyChanges(ctx, tc.changes)
 			require.Equal(t, tc.err, err)
 			endpoints, err := provider.Records(ctx)

@@ -32,6 +32,7 @@ import (
 	extdnshttp "sigs.k8s.io/external-dns/pkg/http"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
 )
@@ -124,8 +125,13 @@ type GoogleProvider struct {
 	ctx context.Context
 }
 
-// NewGoogleProvider initializes a new Google CloudDNS based Provider.
-func NewGoogleProvider(ctx context.Context, project string, domainFilter *endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, batchChangeSize int, batchChangeInterval time.Duration, zoneVisibility string, dryRun bool) (*GoogleProvider, error) {
+// New creates a Google Cloud DNS provider from the given configuration.
+func New(ctx context.Context, cfg *externaldns.Config, domainFilter *endpoint.DomainFilter) (provider.Provider, error) {
+	return newProvider(ctx, cfg.GoogleProject, domainFilter, provider.NewZoneIDFilter(cfg.ZoneIDFilter), cfg.GoogleBatchChangeSize, cfg.GoogleBatchChangeInterval, cfg.GoogleZoneVisibility, cfg.DryRun)
+}
+
+// newProvider initializes a new Google CloudDNS based Provider.
+func newProvider(ctx context.Context, project string, domainFilter *endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, batchChangeSize int, batchChangeInterval time.Duration, zoneVisibility string, dryRun bool) (*GoogleProvider, error) {
 	gcloud, err := google.DefaultClient(ctx, dns.NdevClouddnsReadwriteScope)
 	if err != nil {
 		return nil, err
@@ -187,7 +193,7 @@ func (p *GoogleProvider) Zones(ctx context.Context) (map[string]*dns.ManagedZone
 
 	log.Debugf("Matching zones against domain filters: %v", p.domainFilter)
 	if err := p.managedZonesClient.List(p.project).Pages(ctx, f); err != nil {
-		return nil, provider.NewSoftError(fmt.Errorf("failed to list zones: %w", err))
+		return nil, provider.NewSoftErrorf("failed to list zones: %w", err)
 	}
 
 	if len(zones) == 0 {
@@ -297,7 +303,7 @@ func (p *GoogleProvider) submitChange(ctx context.Context, change *dns.Change) e
 			}
 
 			if _, err := p.changesClient.Create(p.project, zone, c).Do(); err != nil {
-				return provider.NewSoftError(fmt.Errorf("failed to create changes: %w", err))
+				return provider.NewSoftErrorf("failed to create changes: %w", err)
 			}
 
 			time.Sleep(p.batchChangeInterval)

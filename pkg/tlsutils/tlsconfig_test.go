@@ -19,16 +19,17 @@ package tlsutils
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"sigs.k8s.io/external-dns/internal/gen/docs/utils"
 )
 
-var rsaCertPEM = `-----BEGIN CERTIFICATE-----
+var (
+	rsaCertPEM = `-----BEGIN CERTIFICATE-----
 MIIB0zCCAX2gAwIBAgIJAI/M7BYjwB+uMA0GCSqGSIb3DQEBBQUAMEUxCzAJBgNV
 BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
 aWRnaXRzIFB0eSBMdGQwHhcNMTIwOTEyMjE1MjAyWhcNMTUwOTEyMjE1MjAyWjBF
@@ -41,8 +42,7 @@ MAMBAf8wDQYJKoZIhvcNAQEFBQADQQBJlffJHybjDGxRMqaRmDhX0+6v02TUKZsW
 r5QuVbpQhH6u+0UgcW0jp9QwpxoPTLTWGXEWBBBurxFwiCBhkQ+V
 -----END CERTIFICATE-----
 `
-
-var rsaKeyPEM = testingKey(`-----BEGIN RSA TESTING KEY-----
+	rsaKeyPEM = testingKey(`-----BEGIN RSA TESTING KEY-----
 MIIBOwIBAAJBANLJhPHhITqQbPklG3ibCVxwGMRfp/v4XqhfdQHdcVfHap6NQ5Wo
 k/4xIA+ui35/MmNartNuC+BdZ1tMuVCPFZcCAwEAAQJAEJ2N+zsR0Xn8/Q6twa4G
 6OB1M1WO+k+ztnX/1SvNeWu8D6GImtupLTYgjZcHufykj09jiHmjHx8u8ZZB/o1N
@@ -52,8 +52,16 @@ xVLHwDXh/6NJAiEAl2oHGGLz64BuAfjKrqwz7qMYr9HCLIe/YsoWq/olzScCIQDi
 D2lWusoe2/nEqfDVVWGWlyJ7yOmqaVm/iNUN9B2N2g==
 -----END RSA TESTING KEY-----
 `)
+)
 
 func testingKey(s string) string { return strings.ReplaceAll(s, "TESTING KEY", "PRIVATE KEY") }
+
+func writeTempFile(t *testing.T, dir, name, content, envKey string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	t.Setenv(envKey, path)
+}
 
 func TestCreateTLSConfig(t *testing.T) {
 
@@ -75,7 +83,7 @@ func TestCreateTLSConfig(t *testing.T) {
 			"",
 			"",
 			"",
-			func(actual *tls.Config, err error) {
+			func(_ *tls.Config, err error) {
 				assert.Contains(t, err.Error(), "either both cert and key or none must be provided")
 			},
 		},
@@ -87,7 +95,7 @@ func TestCreateTLSConfig(t *testing.T) {
 			"invalid-key",
 			"",
 			"",
-			func(actual *tls.Config, err error) {
+			func(_ *tls.Config, err error) {
 				assert.Contains(t, err.Error(), "could not load TLS cert")
 			},
 		},
@@ -102,7 +110,7 @@ func TestCreateTLSConfig(t *testing.T) {
 			func(actual *tls.Config, err error) {
 				require.NoError(t, err)
 				assert.Equal(t, "server-name", actual.ServerName)
-				assert.NotNil(t, actual.Certificates[0])
+				require.NotNil(t, actual.Certificates[0])
 				assert.False(t, actual.InsecureSkipVerify)
 				assert.Equal(t, actual.MinVersion, uint16(defaultMinVersion))
 			},
@@ -115,9 +123,9 @@ func TestCreateTLSConfig(t *testing.T) {
 			"",
 			"",
 			"",
-			func(actual *tls.Config, err error) {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "could not read root certs")
+			func(_ *tls.Config, err error) {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "could not parse PEM certificates from")
 			},
 		},
 		{
@@ -128,8 +136,8 @@ func TestCreateTLSConfig(t *testing.T) {
 			"",
 			"",
 			"server-name",
-			func(actual *tls.Config, err error) {
-				assert.Error(t, err)
+			func(_ *tls.Config, err error) {
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), "error reading /path/does/not/exist")
 			},
 		},
@@ -144,8 +152,8 @@ func TestCreateTLSConfig(t *testing.T) {
 			func(actual *tls.Config, err error) {
 				require.NoError(t, err)
 				assert.Equal(t, "server-name", actual.ServerName)
-				assert.NotNil(t, actual.Certificates[0])
-				assert.NotNil(t, actual.RootCAs)
+				require.NotNil(t, actual.Certificates[0])
+				require.NotNil(t, actual.RootCAs)
 				assert.False(t, actual.InsecureSkipVerify)
 			},
 		},
@@ -156,26 +164,18 @@ func TestCreateTLSConfig(t *testing.T) {
 			// setup
 			dir := t.TempDir()
 
-			if tc.caFile != "" {
-				path := fmt.Sprintf("%s/caFile", dir)
-				utils.WriteToFile(path, tc.caFile)
-				t.Setenv(fmt.Sprintf("%s_CA_FILE", tc.prefix), path)
-			}
-
 			if tc.caFile == "ca-path-does-not-exist" {
 				t.Setenv(fmt.Sprintf("%s_CA_FILE", tc.prefix), "/path/does/not/exist")
+			} else if tc.caFile != "" {
+				writeTempFile(t, dir, "caFile", tc.caFile, fmt.Sprintf("%s_CA_FILE", tc.prefix))
 			}
 
 			if tc.certFile != "" {
-				path := fmt.Sprintf("%s/certFile", dir)
-				utils.WriteToFile(path, tc.certFile)
-				t.Setenv(fmt.Sprintf("%s_CERT_FILE", tc.prefix), path)
+				writeTempFile(t, dir, "certFile", tc.certFile, fmt.Sprintf("%s_CERT_FILE", tc.prefix))
 			}
 
 			if tc.keyFile != "" {
-				path := fmt.Sprintf("%s/keyFile", dir)
-				utils.WriteToFile(path, tc.keyFile)
-				t.Setenv(fmt.Sprintf("%s_KEY_FILE", tc.prefix), path)
+				writeTempFile(t, dir, "keyFile", tc.keyFile, fmt.Sprintf("%s_KEY_FILE", tc.prefix))
 			}
 
 			if tc.serverName != "" {
@@ -183,7 +183,7 @@ func TestCreateTLSConfig(t *testing.T) {
 			}
 
 			if tc.isInsecureStr != "" {
-				t.Setenv(fmt.Sprintf("%s_INSECURE", tc.prefix), tc.isInsecureStr)
+				t.Setenv(fmt.Sprintf("%s_TLS_INSECURE", tc.prefix), tc.isInsecureStr)
 			}
 
 			// test

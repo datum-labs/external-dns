@@ -33,6 +33,18 @@ import (
 	"sigs.k8s.io/external-dns/provider"
 
 	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
+	"sigs.k8s.io/external-dns/pkg/version"
+)
+
+const (
+	logFieldRecord     = "record"
+	logFieldType       = "type"
+	logFieldAction     = "action"
+	logFieldZoneName   = "zoneName"
+	logFieldZoneID     = "zoneID"
+	logFieldDNSName    = "dnsName"
+	logFieldRecordType = "recordType"
+	logFieldTarget     = "target"
 )
 
 // LinodeDomainClient interface to ease testing
@@ -78,8 +90,13 @@ type LinodeChangeDelete struct {
 	DomainRecord linodego.DomainRecord
 }
 
-// NewLinodeProvider initializes a new Linode DNS based Provider.
-func NewLinodeProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*LinodeProvider, error) {
+// New creates a Linode provider from the given configuration.
+func New(_ context.Context, cfg *externaldns.Config, domainFilter *endpoint.DomainFilter) (provider.Provider, error) {
+	return newProvider(domainFilter, cfg.DryRun)
+}
+
+// newProvider initializes a new Linode DNS based Provider.
+func newProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*LinodeProvider, error) {
 	token, ok := os.LookupEnv("LINODE_TOKEN")
 	if !ok {
 		return nil, fmt.Errorf("no token found")
@@ -94,7 +111,7 @@ func NewLinodeProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*Linod
 	}
 
 	linodeClient := linodego.NewClient(oauth2Client)
-	linodeClient.SetUserAgent(fmt.Sprintf("%s linodego/%s", externaldns.UserAgent(), linodego.Version))
+	linodeClient.SetUserAgent(fmt.Sprintf("%s linodego/%s", version.UserAgent(), linodego.Version))
 
 	return &LinodeProvider{
 		Client:       &linodeClient,
@@ -178,11 +195,11 @@ func (p *LinodeProvider) fetchZones(ctx context.Context) ([]linodego.Domain, err
 func (p *LinodeProvider) submitChanges(ctx context.Context, changes LinodeChanges) error {
 	for _, change := range changes.Creates {
 		logFields := log.Fields{
-			"record":   change.Options.Name,
-			"type":     change.Options.Type,
-			"action":   "Create",
-			"zoneName": change.Domain.Domain,
-			"zoneID":   change.Domain.ID,
+			logFieldRecord:   change.Options.Name,
+			logFieldType:     change.Options.Type,
+			logFieldAction:   "Create",
+			logFieldZoneName: change.Domain.Domain,
+			logFieldZoneID:   change.Domain.ID,
 		}
 
 		log.WithFields(logFields).Info("Creating record.")
@@ -199,11 +216,11 @@ func (p *LinodeProvider) submitChanges(ctx context.Context, changes LinodeChange
 
 	for _, change := range changes.Deletes {
 		logFields := log.Fields{
-			"record":   change.DomainRecord.Name,
-			"type":     change.DomainRecord.Type,
-			"action":   "Delete",
-			"zoneName": change.Domain.Domain,
-			"zoneID":   change.Domain.ID,
+			logFieldRecord:   change.DomainRecord.Name,
+			logFieldType:     change.DomainRecord.Type,
+			logFieldAction:   "Delete",
+			logFieldZoneName: change.Domain.Domain,
+			logFieldZoneID:   change.Domain.ID,
 		}
 
 		log.WithFields(logFields).Info("Deleting record.")
@@ -220,11 +237,11 @@ func (p *LinodeProvider) submitChanges(ctx context.Context, changes LinodeChange
 
 	for _, change := range changes.Updates {
 		logFields := log.Fields{
-			"record":   change.Options.Name,
-			"type":     change.Options.Type,
-			"action":   "Update",
-			"zoneName": change.Domain.Domain,
-			"zoneID":   change.Domain.ID,
+			logFieldRecord:   change.Options.Name,
+			logFieldType:     change.Options.Type,
+			logFieldAction:   "Update",
+			logFieldZoneName: change.Domain.Domain,
+			logFieldZoneID:   change.Domain.ID,
 		}
 
 		log.WithFields(logFields).Info("Updating record.")
@@ -304,8 +321,8 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 		if len(creates) == 0 {
 			log.WithFields(log.Fields{
-				"zoneID":   zoneID,
-				"zoneName": zone.Domain,
+				logFieldZoneID:   zoneID,
+				logFieldZoneName: zone.Domain,
 			}).Debug("Skipping Zone, no creates found.")
 			continue
 		}
@@ -317,10 +334,10 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 			if len(matchedRecords) != 0 {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"zoneName":   zone.Domain,
-					"dnsName":    ep.DNSName,
-					"recordType": ep.RecordType,
+					logFieldZoneID:     zoneID,
+					logFieldZoneName:   zone.Domain,
+					logFieldDNSName:    ep.DNSName,
+					logFieldRecordType: ep.RecordType,
 				}).Warn("Records found which should not exist. Not touching it.")
 				continue
 			}
@@ -353,8 +370,8 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 		if len(updates) == 0 {
 			log.WithFields(log.Fields{
-				"zoneID":   zoneID,
-				"zoneName": zone.Domain,
+				logFieldZoneID:   zoneID,
+				logFieldZoneName: zone.Domain,
 			}).Debug("Skipping Zone, no updates found.")
 			continue
 		}
@@ -366,10 +383,10 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 			if len(matchedRecords) == 0 {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"dnsName":    ep.DNSName,
-					"zoneName":   zone.Domain,
-					"recordType": ep.RecordType,
+					logFieldZoneID:     zoneID,
+					logFieldDNSName:    ep.DNSName,
+					logFieldZoneName:   zone.Domain,
+					logFieldRecordType: ep.RecordType,
 				}).Warn("Update Records not found.")
 			}
 
@@ -387,11 +404,11 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 			for _, target := range ep.Targets {
 				if record, ok := matchedRecordsByTarget[target]; ok {
 					log.WithFields(log.Fields{
-						"zoneID":     zoneID,
-						"dnsName":    ep.DNSName,
-						"zoneName":   zone.Domain,
-						"recordType": ep.RecordType,
-						"target":     target,
+						logFieldZoneID:     zoneID,
+						logFieldDNSName:    ep.DNSName,
+						logFieldZoneName:   zone.Domain,
+						logFieldRecordType: ep.RecordType,
+						logFieldTarget:     target,
 					}).Warn("Updating Existing Target")
 
 					linodeUpdates = append(linodeUpdates, LinodeChangeUpdate{
@@ -412,11 +429,11 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 				} else {
 					// Record did not previously exist, create new 'target'
 					log.WithFields(log.Fields{
-						"zoneID":     zoneID,
-						"dnsName":    ep.DNSName,
-						"zoneName":   zone.Domain,
-						"recordType": ep.RecordType,
-						"target":     target,
+						logFieldZoneID:     zoneID,
+						logFieldDNSName:    ep.DNSName,
+						logFieldZoneName:   zone.Domain,
+						logFieldRecordType: ep.RecordType,
+						logFieldTarget:     target,
 					}).Warn("Creating New Target")
 
 					linodeCreates = append(linodeCreates, LinodeChangeCreate{
@@ -437,11 +454,11 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 			// Any remaining records have been removed, delete them
 			for _, record := range matchedRecordsByTarget {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"dnsName":    ep.DNSName,
-					"zoneName":   zone.Domain,
-					"recordType": ep.RecordType,
-					"target":     record.Target,
+					logFieldZoneID:     zoneID,
+					logFieldDNSName:    ep.DNSName,
+					logFieldZoneName:   zone.Domain,
+					logFieldRecordType: ep.RecordType,
+					logFieldTarget:     record.Target,
 				}).Warn("Deleting Target")
 
 				linodeDeletes = append(linodeDeletes, LinodeChangeDelete{
@@ -458,8 +475,8 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 		if len(deletes) == 0 {
 			log.WithFields(log.Fields{
-				"zoneID":   zoneID,
-				"zoneName": zone.Domain,
+				logFieldZoneID:   zoneID,
+				logFieldZoneName: zone.Domain,
 			}).Debug("Skipping Zone, no deletes found.")
 			continue
 		}
@@ -471,10 +488,10 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 			if len(matchedRecords) == 0 {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"dnsName":    ep.DNSName,
-					"zoneName":   zone.Domain,
-					"recordType": ep.RecordType,
+					logFieldZoneID:     zoneID,
+					logFieldDNSName:    ep.DNSName,
+					logFieldZoneName:   zone.Domain,
+					logFieldRecordType: ep.RecordType,
 				}).Warn("Records to Delete not found.")
 			}
 

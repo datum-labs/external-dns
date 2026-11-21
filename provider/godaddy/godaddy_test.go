@@ -17,7 +17,6 @@ limitations under the License.
 package godaddy
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -27,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 )
@@ -47,7 +47,7 @@ var (
 	zoneNameExampleNet string = "example.net"
 )
 
-func (c *mockGoDaddyClient) Post(endpoint string, input interface{}, output interface{}) error {
+func (c *mockGoDaddyClient) Post(endpoint string, input any, output any) error {
 	log.Infof("POST: %s - %v", endpoint, input)
 	stub := c.Called(endpoint, input)
 	data, err := json.Marshal(stub.Get(0))
@@ -57,7 +57,7 @@ func (c *mockGoDaddyClient) Post(endpoint string, input interface{}, output inte
 	return stub.Error(1)
 }
 
-func (c *mockGoDaddyClient) Patch(endpoint string, input interface{}, output interface{}) error {
+func (c *mockGoDaddyClient) Patch(endpoint string, input any, output any) error {
 	log.Infof("PATCH: %s - %v", endpoint, input)
 	stub := c.Called(endpoint, input)
 	data, err := json.Marshal(stub.Get(0))
@@ -67,7 +67,7 @@ func (c *mockGoDaddyClient) Patch(endpoint string, input interface{}, output int
 	return stub.Error(1)
 }
 
-func (c *mockGoDaddyClient) Put(endpoint string, input interface{}, output interface{}) error {
+func (c *mockGoDaddyClient) Put(endpoint string, input any, output any) error {
 	log.Infof("PUT: %s - %v", endpoint, input)
 	stub := c.Called(endpoint, input)
 	data, err := json.Marshal(stub.Get(0))
@@ -77,7 +77,7 @@ func (c *mockGoDaddyClient) Put(endpoint string, input interface{}, output inter
 	return stub.Error(1)
 }
 
-func (c *mockGoDaddyClient) Get(endpoint string, output interface{}) error {
+func (c *mockGoDaddyClient) Get(endpoint string, output any) error {
 	log.Infof("GET: %s", endpoint)
 	stub := c.Called(endpoint)
 	data, err := json.Marshal(stub.Get(0))
@@ -87,7 +87,7 @@ func (c *mockGoDaddyClient) Get(endpoint string, output interface{}) error {
 	return stub.Error(1)
 }
 
-func (c *mockGoDaddyClient) Delete(endpoint string, output interface{}) error {
+func (c *mockGoDaddyClient) Delete(endpoint string, output any) error {
 	log.Infof("DELETE: %s", endpoint)
 	stub := c.Called(endpoint)
 	data, err := json.Marshal(stub.Get(0))
@@ -117,7 +117,7 @@ func TestGoDaddyZones(t *testing.T) {
 
 	domains, err := provider.zones()
 
-	assert.NoError(err)
+	require.NoError(t, err)
 	assert.Contains(domains, "example.com")
 	assert.NotContains(domains, "example.net")
 
@@ -126,8 +126,8 @@ func TestGoDaddyZones(t *testing.T) {
 	// Error on getting zones
 	client.On("Get", domainsURI).Return(nil, ErrAPIDown).Once()
 	domains, err = provider.zones()
-	assert.Error(err)
-	assert.Nil(domains)
+	require.Error(t, err)
+	require.Nil(t, domains)
 	client.AssertExpectations(t)
 }
 
@@ -160,9 +160,9 @@ func TestGoDaddyZoneRecords(t *testing.T) {
 		},
 	}, nil).Once()
 
-	zones, records, err := provider.zonesRecords(context.TODO(), true)
+	zones, records, err := provider.zonesRecords(t.Context(), true)
 
-	assert.NoError(err)
+	require.NoError(t, err)
 
 	assert.ElementsMatch(zones, []string{
 		zoneNameExampleNet,
@@ -192,10 +192,10 @@ func TestGoDaddyZoneRecords(t *testing.T) {
 
 	// Error on getting zones list
 	client.On("Get", domainsURI).Return(nil, ErrAPIDown).Once()
-	zones, records, err = provider.zonesRecords(context.TODO(), false)
-	assert.Error(err)
-	assert.Nil(zones)
-	assert.Nil(records)
+	zones, records, err = provider.zonesRecords(t.Context(), false)
+	require.Error(t, err)
+	require.Nil(t, zones)
+	require.Nil(t, records)
 	client.AssertExpectations(t)
 
 	// Error on getting zone records
@@ -207,11 +207,11 @@ func TestGoDaddyZoneRecords(t *testing.T) {
 
 	client.On("Get", "/v1/domains/example.net/records").Return(nil, ErrAPIDown).Once()
 
-	zones, records, err = provider.zonesRecords(context.TODO(), false)
+	zones, records, err = provider.zonesRecords(t.Context(), false)
 
-	assert.Error(err)
-	assert.Nil(zones)
-	assert.Nil(records)
+	require.Error(t, err)
+	require.Nil(t, zones)
+	require.Nil(t, records)
 	client.AssertExpectations(t)
 
 	// Error on getting zone record detail
@@ -223,10 +223,10 @@ func TestGoDaddyZoneRecords(t *testing.T) {
 
 	client.On("Get", "/v1/domains/example.net/records").Return(nil, ErrAPIDown).Once()
 
-	zones, records, err = provider.zonesRecords(context.TODO(), false)
-	assert.Error(err)
-	assert.Nil(zones)
-	assert.Nil(records)
+	zones, records, err = provider.zonesRecords(t.Context(), false)
+	require.Error(t, err)
+	require.Nil(t, zones)
+	require.Nil(t, records)
 	client.AssertExpectations(t)
 }
 
@@ -277,8 +277,8 @@ func TestGoDaddyRecords(t *testing.T) {
 		},
 	}, nil).Once()
 
-	endpoints, err := provider.Records(context.TODO())
-	assert.NoError(err)
+	endpoints, err := provider.Records(t.Context())
+	require.NoError(t, err)
 
 	// Little fix for multi targets endpoint
 	for _, endpoint := range endpoints {
@@ -320,14 +320,13 @@ func TestGoDaddyRecords(t *testing.T) {
 
 	// Error getting zone
 	client.On("Get", domainsURI).Return(nil, ErrAPIDown).Once()
-	endpoints, err = provider.Records(context.TODO())
-	assert.Error(err)
-	assert.Nil(endpoints)
+	endpoints, err = provider.Records(t.Context())
+	require.Error(t, err)
+	require.Nil(t, endpoints)
 	client.AssertExpectations(t)
 }
 
 func TestGoDaddyChange(t *testing.T) {
-	assert := assert.New(t)
 	client := newMockGoDaddyClient(t)
 	provider := &GDProvider{
 		client: client,
@@ -385,7 +384,7 @@ func TestGoDaddyChange(t *testing.T) {
 	// Delete entry
 	client.On("Delete", "/v1/domains/example.net/records/A/godaddy").Return(nil, nil).Once()
 
-	assert.NoError(provider.ApplyChanges(context.TODO(), &changes))
+	require.NoError(t, provider.ApplyChanges(t.Context(), &changes))
 
 	client.AssertExpectations(t)
 }
@@ -398,7 +397,6 @@ const (
 )
 
 func TestGoDaddyErrorResponse(t *testing.T) {
-	assert := assert.New(t)
 	client := newMockGoDaddyClient(t)
 	provider := &GDProvider{
 		client: client,
@@ -453,7 +451,7 @@ func TestGoDaddyErrorResponse(t *testing.T) {
 		}},
 	}, errors.New(operationFailedTestReason)).Once()
 
-	assert.Error(provider.ApplyChanges(context.TODO(), &changes))
+	require.Error(t, provider.ApplyChanges(t.Context(), &changes))
 
 	client.AssertExpectations(t)
 }

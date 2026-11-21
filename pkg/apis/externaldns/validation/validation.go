@@ -19,11 +19,14 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
+	"sigs.k8s.io/external-dns/source/annotations"
 )
 
 // ValidateConfig performs validation on the Config object
@@ -38,7 +41,7 @@ func ValidateConfig(cfg *externaldns.Config) error {
 		return err
 	}
 
-	if cfg.IgnoreHostnameAnnotation && cfg.FQDNTemplate == "" {
+	if cfg.IgnoreHostnameAnnotation && len(cfg.FQDNTemplate) == 0 {
 		return errors.New("FQDN Template must be set if ignoring annotations")
 	}
 
@@ -51,18 +54,59 @@ func ValidateConfig(cfg *externaldns.Config) error {
 		return errors.New("--label-filter does not specify a valid label selector")
 	}
 
+	if _, err := metav1.ParseToLabelSelector(cfg.AnnotationFilter); err != nil {
+		return errors.New("--annotation-filter does not specify a valid label selector")
+	}
+
 	if cfg.AnnotationPrefix == "" {
 		return errors.New("--annotation-prefix cannot be empty")
 	}
 	if !strings.HasSuffix(cfg.AnnotationPrefix, "/") {
 		return errors.New("--annotation-prefix must end with '/'")
 	}
+	// Rewriting the legacy prefix into a prefix that itself starts with it does not make sense
+	if cfg.EnableLegacyAnnotationPrefix && strings.HasPrefix(cfg.AnnotationPrefix, annotations.LegacyAnnotationPrefix) {
+		return fmt.Errorf("--enable-legacy-annotation-prefix cannot be used with --annotation-prefix %s, which starts with the legacy prefix", cfg.AnnotationPrefix)
+	}
+
+	if cfg.KubeAPIQPS <= 0 {
+		return errors.New("--kube-api-qps must be greater than 0")
+	}
+	if cfg.KubeAPIBurst <= 0 {
+		return errors.New("--kube-api-burst must be greater than 0")
+	}
+
+	if cfg.CreatePTR && !cfg.IsPTRSupported() {
+		return errors.New("--create-ptr requires PTR in --managed-record-types")
+	}
+
+	if err := validateNamespaces(cfg); err != nil {
+		return err
+	}
 
 	return nil
 }
 
+// validateNamespaces rejects several --namespace values for sources watching a single one,
+// which would otherwise silently watch only the first.
+func validateNamespaces(cfg *externaldns.Config) error {
+	if len(externaldns.NormalizeNamespaces(cfg.Namespaces)) < 2 {
+		return nil
+	}
+	var unsupported []string
+	for _, source := range cfg.Sources {
+		if !externaldns.SourceSupportsMultipleNamespaces(source) && !slices.Contains(unsupported, source) {
+			unsupported = append(unsupported, source)
+		}
+	}
+	if len(unsupported) > 0 {
+		return fmt.Errorf("--namespace accepts a single value with the following sources: %s", strings.Join(unsupported, ", "))
+	}
+	return nil
+}
+
 func preValidateConfig(cfg *externaldns.Config) error {
-	if cfg.LogFormat != "text" && cfg.LogFormat != "json" {
+	if cfg.LogFormat != externaldns.LogFormatText && cfg.LogFormat != externaldns.LogFormatJSON {
 		return fmt.Errorf("unsupported log format: %s", cfg.LogFormat)
 	}
 	if len(cfg.Sources) == 0 {
@@ -71,16 +115,17 @@ func preValidateConfig(cfg *externaldns.Config) error {
 	if cfg.Provider == "" {
 		return errors.New("no provider specified")
 	}
+	if cfg.Policy == "" {
+		return errors.New("--policy must be set explicitly (one of: sync, upsert-only, create-only)")
+	}
 	return nil
 }
 
 func validateConfigForProvider(cfg *externaldns.Config) error {
 	switch cfg.Provider {
-	case "azure":
+	case externaldns.ProviderAzure:
 		return validateConfigForAzure(cfg)
-	case "akamai":
-		return validateConfigForAkamai(cfg)
-	case "rfc2136":
+	case externaldns.ProviderRFC2136:
 		return validateConfigForRfc2136(cfg)
 	default:
 		return nil
@@ -94,28 +139,15 @@ func validateConfigForAzure(cfg *externaldns.Config) error {
 	return nil
 }
 
-func validateConfigForAkamai(cfg *externaldns.Config) error {
-	if cfg.AkamaiServiceConsumerDomain == "" && cfg.AkamaiEdgercPath != "" {
-		return errors.New("no Akamai ServiceConsumerDomain specified")
-	}
-	if cfg.AkamaiClientToken == "" && cfg.AkamaiEdgercPath != "" {
-		return errors.New("no Akamai client token specified")
-	}
-	if cfg.AkamaiClientSecret == "" && cfg.AkamaiEdgercPath != "" {
-		return errors.New("no Akamai client secret specified")
-	}
-	if cfg.AkamaiAccessToken == "" && cfg.AkamaiEdgercPath != "" {
-		return errors.New("no Akamai access token specified")
-	}
-	return nil
-}
-
 func validateConfigForRfc2136(cfg *externaldns.Config) error {
 	if cfg.RFC2136MinTTL < 0 {
 		return errors.New("TTL specified for rfc2136 is negative")
 	}
 	if cfg.RFC2136Insecure && cfg.RFC2136GSSTSIG {
 		return errors.New("--rfc2136-insecure and --rfc2136-gss-tsig are mutually exclusive arguments")
+	}
+	if cfg.RFC2136AXFRInsecure && !cfg.RFC2136AXFR {
+		return errors.New("--rfc2136-axfr-insecure requires --rfc2136-axfr")
 	}
 	if cfg.RFC2136GSSTSIG {
 		if cfg.RFC2136KerberosPassword == "" || cfg.RFC2136KerberosUsername == "" || cfg.RFC2136KerberosRealm == "" {

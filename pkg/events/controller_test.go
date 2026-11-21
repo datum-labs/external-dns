@@ -17,8 +17,8 @@ limitations under the License.
 package events
 
 import (
-	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,16 +33,18 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/util/workqueue"
-
+	eventsclient "k8s.io/client-go/kubernetes/typed/events/v1"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"sigs.k8s.io/external-dns/internal/sets"
+	logtest "sigs.k8s.io/external-dns/internal/testutils/log"
 )
 
 func TestNewEventController_Success(t *testing.T) {
-	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	svr := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer svr.Close()
 
 	mockKubeCfgDir := filepath.Join(t.TempDir(), ".kube")
@@ -68,17 +70,21 @@ users:
   user:
     token: fake-token
 `
-	err = os.WriteFile(mockKubeCfgPath, []byte(fmt.Sprintf(kubeCfgTemplate, svr.URL)), os.FileMode(0755))
+	err = os.WriteFile(mockKubeCfgPath, fmt.Appendf(nil, kubeCfgTemplate, svr.URL), os.FileMode(0755))
+	require.NoError(t, err)
+
+	restConfig, err := clientcmd.BuildConfigFromFlags(svr.URL, mockKubeCfgPath)
+	require.NoError(t, err)
+	client, err := eventsclient.NewForConfig(restConfig)
 	require.NoError(t, err)
 
 	cfg := NewConfig(
-		WithKubeConfig(mockKubeCfgPath, svr.URL, 0),
 		WithEmitEvents([]string{string(RecordReady)}),
 	)
-	ctrl, err := NewEventController(cfg)
+	ctrl, err := NewEventController(client, cfg)
 	require.NoError(t, err)
 	require.NotNil(t, ctrl)
-	require.False(t, ctrl.dryRun)
+	require.Empty(t, ctrl.createOpts.DryRun)
 }
 
 func TestController_Run_NoEmitEvents(t *testing.T) {
@@ -95,40 +101,25 @@ func TestController_Run_NoEmitEvents(t *testing.T) {
 
 func TestController_Run_EmitEvents(t *testing.T) {
 	log.SetLevel(log.ErrorLevel)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	eventCreated := make(chan struct{})
 	kubeClient := fake.NewClientset()
-	kubeClient.PrependReactor("create", "events", func(action clienttesting.Action) (bool, runtime.Object, error) {
+	kubeClient.PrependReactor("create", "events", func(_ clienttesting.Action) (bool, runtime.Object, error) {
 		eventCreated <- struct{}{}
 		return true, nil, nil
 	})
 
-	eventsClient := kubeClient.EventsV1()
-	ctrl := &Controller{
-		client:     eventsClient,
-		emitEvents: sets.New[Reason](RecordReady),
-		queue: workqueue.NewTypedRateLimitingQueueWithConfig[any](
-			workqueue.DefaultTypedControllerRateLimiter[any](),
-			workqueue.TypedRateLimitingQueueConfig[any]{Name: controllerName},
-		),
-		hostname:        controllerName,
-		maxQueuedEvents: 1,
-	}
+	ctrl, err := NewEventController(kubeClient.EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+	require.NoError(t, err)
 
-	ctrl.Run(ctx)
+	ctrl.Run(t.Context())
 
 	event := NewEvent(NewObjectReference(&v1.Pod{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Pod",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fake-object",
-			Namespace: v1.NamespaceDefault,
-			UID:       "9de3fc19-8aeb-4e76-865d-ada955403103",
-		},
+		Kind:       "Pod",
+		APIVersion: "v1",
+		Name:       "fake-object",
+		Namespace:  v1.NamespaceDefault,
+		UID:        "9de3fc19-8aeb-4e76-865d-ada955403103",
 	}, "fake-source"), "record created", ActionCreate, RecordReady)
 
 	ctrl.Add(event)
@@ -141,40 +132,151 @@ func TestController_Run_EmitEvents(t *testing.T) {
 }
 
 func TestController_Queue_EmitEvents(t *testing.T) {
-	log.SetLevel(log.ErrorLevel)
-
-	eventsClient := fake.NewClientset().EventsV1()
-	ctrl := &Controller{
-		client:     eventsClient,
-		emitEvents: sets.New[Reason](RecordReady),
-		queue: workqueue.NewTypedRateLimitingQueueWithConfig[any](
-			workqueue.DefaultTypedControllerRateLimiter[any](),
-			workqueue.TypedRateLimitingQueueConfig[any]{Name: controllerName},
-		),
-		hostname:        controllerName,
-		maxQueuedEvents: 1,
-	}
+	ctrl, err := NewEventController(fake.NewClientset().EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+	require.NoError(t, err)
 
 	event := NewEvent(NewObjectReference(&v1.Pod{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Pod",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fake-object",
-			Namespace: v1.NamespaceDefault,
-			UID:       "9de3fc19-8aeb-4e76-865d-ada955403103",
-		},
+		Kind:       "Pod",
+		APIVersion: "v1",
+		Name:       "fake-object",
+		Namespace:  v1.NamespaceDefault,
+		UID:        "9de3fc19-8aeb-4e76-865d-ada955403103",
 	}, "fake-source"), "record created", ActionCreate, RecordReady)
 
 	ctrl.Add(event)
 
-	queueItem, shutdown := ctrl.queue.Get()
+	item, shutdown := ctrl.queue.Get()
 	require.False(t, shutdown)
-	value, ok := queueItem.(*eventsv1.Event)
-	assert.True(t, ok)
-	assert.NotNil(t, value)
+	require.NotNil(t, item)
 
-	assert.Contains(t, value.Name, "fake-object.")
-	assert.Contains(t, value.Reason, RecordReady)
+	assert.Contains(t, item.Name, "fake-object.")
+	assert.Contains(t, item.Reason, RecordReady)
+}
+
+func TestController_Add(t *testing.T) {
+	svcRef := NewObjectReference(&v1.Service{
+		Kind: "Service", APIVersion: "v1",
+		Name: "my-svc", Namespace: "default", UID: "uid-svc",
+	}, "service")
+
+	crdRef := NewObjectReference(&v1.ConfigMap{
+		Kind: "ConfigMap", APIVersion: "v1",
+		Name: "my-crd", Namespace: "default", UID: "uid-crd",
+	}, "crd")
+
+	ep := func(refs ...*ObjectReference) EndpointInfo {
+		return &mockEndpointInfo{
+			dnsName:    "example.com",
+			recordType: "A",
+			recordTTL:  300,
+			targets:    []string{"1.2.3.4"},
+			owner:      "owner",
+			refObjects: refs,
+		}
+	}
+
+	t.Run("single ref object enqueues one k8s event", func(t *testing.T) {
+		ctrl, err := NewEventController(fake.NewClientset().EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+		require.NoError(t, err)
+		ctrl.Add(NewEventFromEndpoint(ep(svcRef), ActionCreate, RecordReady))
+		assert.Equal(t, 1, ctrl.queue.Len())
+	})
+
+	t.Run("multiple ref objects enqueue one k8s event per ref", func(t *testing.T) {
+		ctrl, err := NewEventController(fake.NewClientset().EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+		require.NoError(t, err)
+		ctrl.Add(NewEventFromEndpoint(ep(svcRef, crdRef), ActionCreate, RecordReady))
+		assert.Equal(t, 2, ctrl.queue.Len())
+	})
+}
+
+func TestController_ProcessNextWorkItem(t *testing.T) {
+	t.Run("dryRun sets DryRunAll on create options", func(t *testing.T) {
+		var capturedDryRun []string
+		kubeClient := fake.NewClientset()
+		kubeClient.PrependReactor("create", "events", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			capturedDryRun = action.(clienttesting.CreateActionImpl).CreateOptions.DryRun
+			return true, nil, nil
+		})
+		ctrl, err := NewEventController(kubeClient.EventsV1(), &Config{dryRun: true})
+		require.NoError(t, err)
+		ctrl.queue.Add(&eventsv1.Event{
+			Name: "test-event", Namespace: "default",
+		})
+		ctrl.processNextWorkItem(t.Context())
+		assert.Equal(t, []string{metav1.DryRunAll}, capturedDryRun)
+	})
+
+	t.Run("drops event after max retries", func(t *testing.T) {
+		hook := logtest.LogsUnderTestWithLogLevel(log.ErrorLevel, t)
+		kubeClient := fake.NewClientset()
+		kubeClient.PrependReactor("create", "events", func(_ clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("persistent error")
+		})
+		ctrl, err := NewEventController(kubeClient.EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+		require.NoError(t, err)
+
+		ctrl.queue.Add(&eventsv1.Event{
+			Name: "test-event", Namespace: "default",
+		})
+		// First maxTriesPerEvent calls requeue; the final call exhausts retries and drops.
+		for range maxRetriesPerEvent + 1 {
+			ctrl.processNextWorkItem(t.Context())
+		}
+		logtest.TestHelperLogContains("dropping event", hook, t)
+	})
+}
+
+func TestController_Emit_SkipsUnconfiguredReason(t *testing.T) {
+	hook := logtest.LogsUnderTestWithLogLevel(log.DebugLevel, t)
+	kubeClient := fake.NewClientset()
+	ctrl, err := NewEventController(kubeClient.EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+	require.NoError(t, err)
+
+	ctrl.emit(&eventsv1.Event{
+		Name: "test-event", Namespace: "default",
+		Reason: string(RecordDeleted), // not in emitEvents
+	})
+
+	assert.Equal(t, 0, ctrl.queue.Len())
+	logtest.TestHelperLogContains("skipping event", hook, t)
+}
+
+func TestController_ProcessNextWorkItem_RequestOnError(t *testing.T) {
+	log.SetOutput(io.Discard)
+
+	createAttempts := 0
+	kubeClient := fake.NewClientset()
+
+	eventCreated := make(chan struct{}, 1)
+	kubeClient.PrependReactor("create", "events", func(_ clienttesting.Action) (bool, runtime.Object, error) {
+		createAttempts++
+		if createAttempts <= maxRetriesPerEvent {
+			return true, nil, fmt.Errorf("transient API error")
+		}
+		eventCreated <- struct{}{}
+		return true, nil, nil
+	})
+
+	ctrl, err := NewEventController(kubeClient.EventsV1(), &Config{emitEvents: sets.New(RecordReady)})
+	require.NoError(t, err)
+
+	ctrl.Run(t.Context())
+
+	event := NewEvent(NewObjectReference(&v1.Pod{
+		Kind:       "Pod",
+		APIVersion: "v1",
+		Name:       "fake-object",
+		Namespace:  v1.NamespaceDefault,
+		UID:        "9de3fc19-8aeb-4e76-865d-ada955403103",
+	}, "fake-source"), "record created", ActionCreate, RecordReady)
+
+	ctrl.Add(event)
+
+	select {
+	case <-eventCreated:
+		assert.Greater(t, createAttempts, 1, "event should have been retried at least once")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("event was not retried and delivered; only %d attempt(s) made", createAttempts)
+	}
 }

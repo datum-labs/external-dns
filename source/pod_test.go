@@ -17,9 +17,9 @@ limitations under the License.
 package source
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 
 	log "github.com/sirupsen/logrus"
@@ -29,12 +29,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	corev1lister "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
+	"sigs.k8s.io/external-dns/source/types"
+
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/internal/testutils"
+	logtest "sigs.k8s.io/external-dns/internal/testutils/log"
 	"sigs.k8s.io/external-dns/source/annotations"
+	templatetest "sigs.k8s.io/external-dns/source/template/testutil"
 
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -68,13 +73,11 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -85,13 +88,11 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -99,6 +100,32 @@ func TestPodSource(t *testing.T) {
 					},
 					Status: corev1.PodStatus{
 						PodIP: "10.0.1.2",
+					},
+				},
+			},
+		},
+		{
+			"pod with a hostname label over 63 characters is skipped instead of panicking",
+			"",
+			"",
+			true,
+			"",
+			nil,
+			false,
+			nodesFixturesIPv4(),
+			[]*corev1.Pod{
+				{
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: strings.Repeat("a", 64) + ".example.org",
+					},
+					Spec: corev1.PodSpec{
+						HostNetwork: true,
+						NodeName:    "my-node1",
+					},
+					Status: corev1.PodStatus{
+						PodIP: "10.0.1.1",
 					},
 				},
 			},
@@ -117,13 +144,11 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
-							kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
+						kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -134,13 +159,11 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
-							kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
+						kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -166,13 +189,11 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv6(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -183,13 +204,11 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -215,13 +234,11 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv6(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
-							kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
+						kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -232,13 +249,11 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
-							kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						kopsDNSControllerInternalHostnameAnnotationKey: "internal.a.foo.example.org",
+						kopsDNSControllerHostnameAnnotationKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -264,14 +279,12 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-							annotations.TargetKey:           "208.1.2.1",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
+						annotations.TargetKey:           "208.1.2.1",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -282,14 +295,12 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-							annotations.TargetKey:           "208.1.2.2",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
+						annotations.TargetKey:           "208.1.2.2",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -315,9 +326,7 @@ func TestPodSource(t *testing.T) {
 			false,
 			[]*corev1.Node{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "my-node1",
-					},
+					Name: "my-node1",
 					Status: corev1.NodeStatus{
 						Addresses: []corev1.NodeAddress{
 							{Type: corev1.NodeExternalIP, Address: "54.10.11.1"},
@@ -327,9 +336,7 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "my-node2",
-					},
+					Name: "my-node2",
 					Status: corev1.NodeStatus{
 						Addresses: []corev1.NodeAddress{
 							{Type: corev1.NodeExternalIP, Address: "54.10.11.2"},
@@ -340,13 +347,11 @@ func TestPodSource(t *testing.T) {
 			},
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "a.foo.example.org",
-							annotations.TtlKey:      "1h30m",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "a.foo.example.org",
+						annotations.TtlKey:      "1h30m",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -357,12 +362,10 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "b.foo.example.org",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "b.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -388,14 +391,12 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-							annotations.TtlKey:              "1s",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
+						annotations.TtlKey:              "1s",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -406,13 +407,11 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: false,
@@ -438,13 +437,11 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -455,14 +452,12 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "default",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-							annotations.TtlKey:              "1s",
-						},
+					Name:      "my-pod2",
+					Namespace: "default",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
+						annotations.TtlKey:              "1s",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -487,9 +482,7 @@ func TestPodSource(t *testing.T) {
 			false,
 			[]*corev1.Node{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "my-node1",
-					},
+					Name: "my-node1",
 					Status: corev1.NodeStatus{
 						Addresses: []corev1.NodeAddress{
 							{Type: corev1.NodeInternalIP, Address: "10.0.1.1"},
@@ -499,12 +492,10 @@ func TestPodSource(t *testing.T) {
 			},
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org,internal.b.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org,internal.b.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -530,12 +521,10 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.TtlKey: "1m",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.TtlKey: "1m",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: false,
@@ -546,17 +535,71 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:        "my-pod2",
-						Namespace:   "kube-system",
-						Annotations: map[string]string{},
-					},
+					Name:        "my-pod2",
+					Namespace:   "kube-system",
+					Annotations: map[string]string{},
 					Spec: corev1.PodSpec{
 						HostNetwork: false,
 						NodeName:    "my-node2",
 					},
 					Status: corev1.PodStatus{
 						PodIP: "192.168.1.2",
+					},
+				},
+			},
+		},
+		{
+			"create records based on internal hostname annotation for non-host network pod",
+			"",
+			"",
+			false,
+			"",
+			[]*endpoint.Endpoint{
+				{DNSName: "internal.a.foo.example.org", Targets: endpoint.Targets{"192.168.1.1"}, RecordType: endpoint.RecordTypeA},
+			},
+			false,
+			nil,
+			[]*corev1.Pod{
+				{
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+					},
+					Spec: corev1.PodSpec{
+						HostNetwork: false,
+						NodeName:    "my-node1",
+					},
+					Status: corev1.PodStatus{
+						PodIP: "192.168.1.1",
+					},
+				},
+			},
+		},
+		{
+			"create records based on internal hostname annotation for host network pod",
+			"",
+			"",
+			false,
+			"",
+			[]*endpoint.Endpoint{
+				{DNSName: "internal.a.foo.example.org", Targets: endpoint.Targets{"192.168.1.1"}, RecordType: endpoint.RecordTypeA},
+			},
+			false,
+			nodesFixturesIPv4(),
+			[]*corev1.Pod{
+				{
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+					},
+					Spec: corev1.PodSpec{
+						HostNetwork: true,
+						NodeName:    "my-node1",
+					},
+					Status: corev1.PodStatus{
+						PodIP: "192.168.1.1",
 					},
 				},
 			},
@@ -577,14 +620,12 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-							annotations.TargetKey:           "208.1.2.1",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
+						annotations.TargetKey:           "208.1.2.1",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -595,14 +636,12 @@ func TestPodSource(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod2",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-							annotations.TargetKey:           "208.1.2.2",
-						},
+					Name:      "my-pod2",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
+						annotations.TargetKey:           "208.1.2.2",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -625,16 +664,99 @@ func TestPodSource(t *testing.T) {
 			nodesFixturesIPv4(),
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-pod1",
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "a.foo.example.org",
-						},
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
 						NodeName:    "missing-node",
+					},
+					Status: corev1.PodStatus{
+						PodIP: "10.0.1.1",
+					},
+				},
+			},
+		},
+		{
+			"provider-specific annotation is not supported and is ignored",
+			"",
+			"",
+			true,
+			"",
+			[]*endpoint.Endpoint{
+				{DNSName: "a.foo.example.org", Targets: endpoint.Targets{"54.10.11.1"}, RecordType: endpoint.RecordTypeA},
+			},
+			false,
+			nodesFixturesIPv4(),
+			[]*corev1.Pod{
+				{
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey:          "a.foo.example.org",
+						annotations.AWSPrefix + "weight": "10",
+					},
+					Spec: corev1.PodSpec{
+						HostNetwork: true,
+						NodeName:    "my-node1",
+					},
+					Status: corev1.PodStatus{
+						PodIP: "10.0.1.1",
+					},
+				},
+			},
+		},
+		{
+			"our controller type is dns-controller",
+			"",
+			"",
+			true,
+			"",
+			[]*endpoint.Endpoint{
+				{DNSName: "a.foo.example.org", Targets: endpoint.Targets{"54.10.11.1"}, RecordType: endpoint.RecordTypeA},
+			},
+			false,
+			nodesFixturesIPv4(),
+			[]*corev1.Pod{
+				{
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.ControllerKey: annotations.ControllerValue,
+						annotations.HostnameKey:   "a.foo.example.org",
+					},
+					Spec: corev1.PodSpec{
+						HostNetwork: true,
+						NodeName:    "my-node1",
+					},
+					Status: corev1.PodStatus{
+						PodIP: "10.0.1.1",
+					},
+				},
+			},
+		},
+		{
+			"different controller types are ignored",
+			"",
+			"",
+			true,
+			"",
+			[]*endpoint.Endpoint{},
+			false,
+			nodesFixturesIPv4(),
+			[]*corev1.Pod{
+				{
+					Name:      "my-pod1",
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.ControllerKey: "some-other-tool",
+						annotations.HostnameKey:   "a.foo.example.org",
+					},
+					Spec: corev1.PodSpec{
+						HostNetwork: true,
+						NodeName:    "my-node1",
 					},
 					Status: corev1.PodStatus{
 						PodIP: "10.0.1.1",
@@ -663,7 +785,12 @@ func TestPodSource(t *testing.T) {
 				}
 			}
 
-			client, err := NewPodSource(ctx, kubernetes, tc.targetNamespace, tc.compatibility, tc.ignoreNonHostNetworkPods, tc.PodSourceDomain, "", false, "", nil)
+			client, err := NewPodSource(ctx, kubernetes, &Config{
+				Namespaces:               []string{tc.targetNamespace},
+				Compatibility:            tc.compatibility,
+				IgnoreNonHostNetworkPods: tc.ignoreNonHostNetworkPods,
+				PodSourceDomain:          tc.PodSourceDomain,
+			})
 			require.NoError(t, err)
 
 			endpoints, err := client.Endpoints(ctx)
@@ -674,7 +801,7 @@ func TestPodSource(t *testing.T) {
 			}
 
 			// Validate returned endpoints against desired endpoints.
-			validateEndpoints(t, endpoints, tc.expected)
+			testutils.ValidateEndpoints(t, endpoints, tc.expected)
 
 			for _, ep := range endpoints {
 				// TODO: source should always set the resource label key. currently not supported by the pod source.
@@ -704,13 +831,11 @@ func TestPodSourceLogs(t *testing.T) {
 			true,
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("my-pod1-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      fmt.Sprintf("my-pod1-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: false,
@@ -730,12 +855,10 @@ func TestPodSourceLogs(t *testing.T) {
 			true,
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("missing-node-pod-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "a.foo.example.org",
-						},
+					Name:      fmt.Sprintf("missing-node-pod-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -757,12 +880,10 @@ func TestPodSourceLogs(t *testing.T) {
 			true,
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("valid-pod-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "valid.foo.example.org",
-						},
+					Name:      fmt.Sprintf("valid-pod-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "valid.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -773,12 +894,10 @@ func TestPodSourceLogs(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("non-hostnet-pod-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "nonhost.foo.example.org",
-						},
+					Name:      fmt.Sprintf("non-hostnet-pod-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "nonhost.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: false,
@@ -789,12 +908,10 @@ func TestPodSourceLogs(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("missing-node-pod-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "missing.foo.example.org",
-						},
+					Name:      fmt.Sprintf("missing-node-pod-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "missing.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -820,12 +937,10 @@ func TestPodSourceLogs(t *testing.T) {
 			true,
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("valid-pod-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.HostnameKey: "valid.foo.example.org",
-						},
+					Name:      fmt.Sprintf("valid-pod-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.HostnameKey: "valid.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: true,
@@ -848,13 +963,11 @@ func TestPodSourceLogs(t *testing.T) {
 			false,
 			[]*corev1.Pod{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("my-pod1-%s", suffix),
-						Namespace: "kube-system",
-						Annotations: map[string]string{
-							annotations.InternalHostnameKey: "internal.a.foo.example.org",
-							annotations.HostnameKey:         "a.foo.example.org",
-						},
+					Name:      fmt.Sprintf("my-pod1-%s", suffix),
+					Namespace: "kube-system",
+					Annotations: map[string]string{
+						annotations.InternalHostnameKey: "internal.a.foo.example.org",
+						annotations.HostnameKey:         "a.foo.example.org",
 					},
 					Spec: corev1.PodSpec{
 						HostNetwork: false,
@@ -874,7 +987,7 @@ func TestPodSourceLogs(t *testing.T) {
 	} {
 		t.Run(tc.title, func(t *testing.T) {
 			kubernetes := fake.NewClientset()
-			ctx := context.Background()
+			ctx := t.Context()
 			// Create the nodes
 			for _, node := range tc.nodes {
 				if _, err := kubernetes.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{}); err != nil {
@@ -891,25 +1004,27 @@ func TestPodSourceLogs(t *testing.T) {
 				}
 			}
 
-			client, err := NewPodSource(ctx, kubernetes, "", "", tc.ignoreNonHostNetworkPods, "", "", false, "", nil)
+			src, err := NewPodSource(ctx, kubernetes, &Config{
+				IgnoreNonHostNetworkPods: tc.ignoreNonHostNetworkPods,
+			})
 			require.NoError(t, err)
 
-			hook := testutils.LogsUnderTestWithLogLevel(log.DebugLevel, t)
+			hook := logtest.LogsUnderTestWithLogLevel(log.DebugLevel, t)
 
-			_, err = client.Endpoints(ctx)
+			_, err = src.Endpoints(ctx)
 			require.NoError(t, err)
 
 			// Check if all expected logs are present in actual logs.
 			// We don't do an exact match because logs are globally shared,
 			// making precise comparisons difficult
 			for _, expectedLog := range tc.expectedDebugLogs {
-				testutils.TestHelperLogContains(expectedLog, hook, t)
+				logtest.TestHelperLogContains(expectedLog, hook, t)
 			}
 
 			// Check that no unexpected logs are present.
 			// This ensures that logs are not generated inappropriately.
 			for _, unexpectedLog := range tc.unexpectedDebugLogs {
-				testutils.TestHelperLogNotContains(unexpectedLog, hook, t)
+				logtest.TestHelperLogNotContains(unexpectedLog, hook, t)
 			}
 		})
 	}
@@ -936,7 +1051,6 @@ func TestPodSource_AddEventHandler(t *testing.T) {
 
 type fakePodInformer struct {
 	mock.Mock
-	informer cache.SharedIndexInformer
 }
 
 func (f *fakePodInformer) Informer() cache.SharedIndexInformer {
@@ -951,9 +1065,7 @@ func (f *fakePodInformer) Lister() corev1lister.PodLister {
 func nodesFixturesIPv6() []*corev1.Node {
 	return []*corev1.Node{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "my-node1",
-			},
+			Name: "my-node1",
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{
 					{Type: corev1.NodeInternalIP, Address: "2001:DB8::1"},
@@ -961,9 +1073,7 @@ func nodesFixturesIPv6() []*corev1.Node {
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "my-node2",
-			},
+			Name: "my-node2",
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{
 					{Type: corev1.NodeInternalIP, Address: "2001:DB8::2"},
@@ -976,9 +1086,7 @@ func nodesFixturesIPv6() []*corev1.Node {
 func nodesFixturesIPv4() []*corev1.Node {
 	return []*corev1.Node{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "my-node1",
-			},
+			Name: "my-node1",
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{
 					{Type: corev1.NodeExternalIP, Address: "54.10.11.1"},
@@ -987,9 +1095,7 @@ func nodesFixturesIPv4() []*corev1.Node {
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "my-node2",
-			},
+			Name: "my-node2",
 			Status: corev1.NodeStatus{
 				Addresses: []corev1.NodeAddress{
 					{Type: corev1.NodeExternalIP, Address: "54.10.11.2"},
@@ -1014,22 +1120,20 @@ func TestPodTransformerInPodSource(t *testing.T) {
 				NodeName:    "test-node",
 				HostNetwork: true,
 			},
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "test-ns",
-				Name:      "test-name",
-				Labels: map[string]string{
-					"label1": "value1",
-					"label2": "value2",
-					"label3": "value3",
-				},
-				Annotations: map[string]string{
-					"user-annotation": "value",
-					"external-dns.alpha.kubernetes.io/hostname": "test-hostname",
-					"external-dns.alpha.kubernetes.io/random":   "value",
-					"other/annotation":                          "value",
-				},
-				UID: "someuid",
+			Namespace: "test-ns",
+			Name:      "test-name",
+			Labels: map[string]string{
+				"label1": "value1",
+				"label2": "value2",
+				"label3": "value3",
 			},
+			Annotations: map[string]string{
+				"user-annotation":                     "value",
+				"external-dns.kubernetes.io/hostname": "test-hostname",
+				"external-dns.kubernetes.io/random":   "value",
+				"other/annotation":                    "value",
+			},
+			UID: "someuid",
 			Status: v1.PodStatus{
 				PodIP:  "127.0.0.1",
 				HostIP: "127.0.0.2",
@@ -1043,11 +1147,11 @@ func TestPodTransformerInPodSource(t *testing.T) {
 			},
 		}
 
-		_, err := fakeClient.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+		_, err := fakeClient.CoreV1().Pods(pod.Namespace).Create(t.Context(), pod, metav1.CreateOptions{})
 		require.NoError(t, err)
 
 		// Should not error when creating the source
-		src, err := NewPodSource(ctx, fakeClient, "", "", false, "", "", false, "", nil)
+		src, err := NewPodSource(ctx, fakeClient, &Config{})
 		require.NoError(t, err)
 		ps, ok := src.(*podSource)
 		require.True(t, ok)
@@ -1058,32 +1162,31 @@ func TestPodTransformerInPodSource(t *testing.T) {
 		// Metadata
 		assert.Equal(t, "test-name", retrieved.Name)
 		assert.Equal(t, "test-ns", retrieved.Namespace)
-		assert.Empty(t, retrieved.UID)
-		assert.Empty(t, retrieved.Labels)
+		assert.Equal(t, pod.UID, retrieved.UID)
+		assert.Equal(t, pod.Labels, retrieved.Labels)
+		assert.Equal(t, pod.Annotations, retrieved.Annotations) // no lastAppliedConfig in test data
+		assert.NotEmpty(t, retrieved.UID)
 		// Filtered
 		assert.Equal(t, map[string]string{
-			"user-annotation": "value",
-			"external-dns.alpha.kubernetes.io/hostname": "test-hostname",
-			"external-dns.alpha.kubernetes.io/random":   "value",
-			"other/annotation":                          "value",
+			"user-annotation":                     "value",
+			"external-dns.kubernetes.io/hostname": "test-hostname",
+			"external-dns.kubernetes.io/random":   "value",
+			"other/annotation":                    "value",
 		}, retrieved.Annotations)
 
-		// Spec
-		assert.Empty(t, retrieved.Spec.Containers)
-		assert.Empty(t, retrieved.Spec.Hostname)
+		// Spec — fully preserved
+		assert.NotEmpty(t, retrieved.Spec.Containers)
+		assert.Equal(t, "test-hostname", retrieved.Spec.Hostname)
 		assert.Equal(t, "test-node", retrieved.Spec.NodeName)
 		assert.True(t, retrieved.Spec.HostNetwork)
 
-		// Status
-		assert.Empty(t, retrieved.Status.ContainerStatuses)
-		assert.Empty(t, retrieved.Status.InitContainerStatuses)
-		assert.Empty(t, retrieved.Status.HostIP)
+		// Status — conditions stripped, rest preserved
 		assert.Equal(t, "127.0.0.1", retrieved.Status.PodIP)
-		assert.Empty(t, retrieved.Status.Conditions)
+		assert.Equal(t, "127.0.0.2", retrieved.Status.HostIP)
+		assert.Empty(t, retrieved.Status.Conditions) // removed by TransformRemoveStatusConditions
 	})
 
-	t.Run("transformer is not used when fqdnTemplate is set", func(t *testing.T) {
-		ctx := t.Context()
+	t.Run("transformer is always applied regardless of fqdnTemplate", func(t *testing.T) {
 		fakeClient := fake.NewClientset()
 
 		pod := &v1.Pod{
@@ -1095,22 +1198,20 @@ func TestPodTransformerInPodSource(t *testing.T) {
 				NodeName:    "test-node",
 				HostNetwork: true,
 			},
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "test-ns",
-				Name:      "test-name",
-				Labels: map[string]string{
-					"label1": "value1",
-					"label2": "value2",
-					"label3": "value3",
-				},
-				Annotations: map[string]string{
-					"user-annotation": "value",
-					"external-dns.alpha.kubernetes.io/hostname": "test-hostname",
-					"external-dns.alpha.kubernetes.io/random":   "value",
-					"other/annotation":                          "value",
-				},
-				UID: "someuid",
+			Namespace: "test-ns",
+			Name:      "test-name",
+			Labels: map[string]string{
+				"label1": "value1",
+				"label2": "value2",
+				"label3": "value3",
 			},
+			Annotations: map[string]string{
+				"user-annotation":                     "value",
+				"external-dns.kubernetes.io/hostname": "test-hostname",
+				"external-dns.kubernetes.io/random":   "value",
+				"other/annotation":                    "value",
+			},
+			UID: "someuid",
 			Status: v1.PodStatus{
 				PodIP:  "127.0.0.1",
 				HostIP: "127.0.0.2",
@@ -1124,11 +1225,13 @@ func TestPodTransformerInPodSource(t *testing.T) {
 			},
 		}
 
-		_, err := fakeClient.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+		_, err := fakeClient.CoreV1().Pods(pod.Namespace).Create(t.Context(), pod, metav1.CreateOptions{})
 		require.NoError(t, err)
 
 		// Should not error when creating the source
-		src, err := NewPodSource(ctx, fakeClient, "", "", false, "", "template", false, "", nil)
+		src, err := NewPodSource(t.Context(), fakeClient, &Config{
+			TemplateEngine: templatetest.MustEngine(t, "template", "", "", false),
+		})
 		require.NoError(t, err)
 		ps, ok := src.(*podSource)
 		require.True(t, ok)
@@ -1142,4 +1245,40 @@ func TestPodTransformerInPodSource(t *testing.T) {
 		assert.NotEmpty(t, retrieved.UID)
 		assert.NotEmpty(t, retrieved.Labels)
 	})
+}
+
+func TestProcessEndpoint_Pod_RefObjectExist(t *testing.T) {
+	elements := []runtime.Object{
+		&v1.Pod{
+			Namespace: "01",
+			Name:      "foo",
+			Annotations: map[string]string{
+				annotations.HostnameKey: "foo.example.com",
+				annotations.TargetKey:   "1.2.3",
+			},
+			UID: "uid-1",
+		},
+		&v1.Pod{
+			Namespace: "02",
+			Name:      "bar",
+			Annotations: map[string]string{
+				annotations.HostnameKey: "bar.example.com",
+				annotations.TargetKey:   "3.4.5",
+			},
+			UID: "uid-2",
+		},
+	}
+
+	fakeClient := fake.NewClientset(elements...)
+
+	client, err := NewPodSource(
+		t.Context(),
+		fakeClient,
+		&Config{},
+	)
+	require.NoError(t, err)
+
+	endpoints, err := client.Endpoints(t.Context())
+	require.NoError(t, err)
+	testutils.AssertEndpointsHaveRefObject(t, endpoints, types.Pod, len(elements))
 }

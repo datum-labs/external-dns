@@ -17,11 +17,11 @@ limitations under the License.
 package informers
 
 import (
-	"context"
 	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -50,17 +50,17 @@ func TestWaitForCacheSync(t *testing.T) {
 	}{
 		{
 			name:        "all caches synced",
-			syncResults: map[reflect.Type]bool{reflect.TypeOf(""): true},
+			syncResults: map[reflect.Type]bool{reflect.TypeFor[string](): true},
 		},
 		{
 			name:        "some caches not synced",
-			syncResults: map[reflect.Type]bool{reflect.TypeOf(""): false},
+			syncResults: map[reflect.Type]bool{reflect.TypeFor[string](): false},
 			expectError: true,
 			errorMsg:    "failed to sync string with timeout 1m0s",
 		},
 		{
 			name:        "context timeout",
-			syncResults: map[reflect.Type]bool{reflect.TypeOf(""): false},
+			syncResults: map[reflect.Type]bool{reflect.TypeFor[string](): false},
 			expectError: true,
 			errorMsg:    "failed to sync string with timeout 1m0s",
 		},
@@ -68,16 +68,16 @@ func TestWaitForCacheSync(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 
 			factory := &mockInformerFactory{syncResults: tt.syncResults}
 			err := WaitForCacheSync(ctx, factory)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Errorf(t, err, tt.errorMsg)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -110,16 +110,16 @@ func TestWaitForDynamicCacheSync(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 
 			factory := &mockDynamicInformerFactory{syncResults: tt.syncResults}
 			err := WaitForDynamicCacheSync(ctx, factory)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Errorf(t, err, tt.errorMsg)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}
