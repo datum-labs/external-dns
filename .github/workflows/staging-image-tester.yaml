@@ -14,17 +14,16 @@ jobs:
   build:
     permissions:
       contents: read  #  to fetch code (actions/checkout)
-      checks: write  #  to create a new check based on the results (shogo82148/actions-goveralls)
 
     name: Build
     runs-on: ubuntu-latest
     steps:
 
     - name: Check out code into the Go module directory
-      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Set up Go 1.x
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: go.mod
       id: go
@@ -35,3 +34,7 @@ jobs:
 
     - name: Test
       run: make build.image/multiarch
+      env:
+        # /tmp has a disk quota on ubuntu-26.04 runners that the multi-arch build exceeds.
+        GOTMPDIR: ${{ runner.temp }}
+        TMPDIR: ${{ runner.temp }}

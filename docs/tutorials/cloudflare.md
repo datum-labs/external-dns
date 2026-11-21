@@ -4,37 +4,6 @@ This tutorial describes how to setup ExternalDNS for usage within a Kubernetes c
 
 Make sure to use **>=0.4.2** version of ExternalDNS for this tutorial.
 
-## CloudFlare SDK Migration Status
-
-ExternalDNS is currently migrating from the legacy CloudFlare Go SDK v0 to the modern v4 SDK to improve performance, reliability, and access to newer CloudFlare features. The migration status is:
-
-**✅ Fully migrated to v4 SDK:**
-
-- Zone management (listing, filtering, pagination)
-- Zone details retrieval (`GetZone`)
-- Zone ID lookup by name (`ZoneIDByName`)
-- Zone plan detection (fully v4 implementation)
-- Regional services (data localization)
-
-**🔄 Still using legacy v0 SDK:**
-
-- DNS record management (create, update, delete records)
-- Custom hostnames
-- Proxied records
-
-This mixed approach ensures continued functionality while gradually modernizing the codebase. Users should not experience any breaking changes during this transition.
-
-### SDK Dependencies
-
-ExternalDNS currently uses:
-
-- **cloudflare-go v0.115.0+**: Legacy SDK for DNS records, custom hostnames, and proxied record features
-- **cloudflare-go/v4 v4.6.0+**: Modern SDK for all zone management and regional services operations
-
-Zone management has been fully migrated to the v4 SDK, providing improved performance and reliability.
-
-Both SDKs are automatically managed as Go module dependencies and require no special configuration from users.
-
 ## Creating a Cloudflare DNS zone
 
 We highly recommend to read this tutorial if you haven't used Cloudflare before:
@@ -52,6 +21,12 @@ API Token will be preferred for authentication if `CF_API_TOKEN` environment var
 Otherwise `CF_API_KEY` and `CF_API_EMAIL` should be set to run ExternalDNS with Cloudflare.
 You may provide the Cloudflare API token through a file by setting the
 `CF_API_TOKEN="file:/path/to/token"`.
+Surrounding whitespace is trimmed from the token before use. This is a fallback safeguard only — the token should be supplied already in the correct format.
+When generating a token for a Kubernetes Secret, use `echo -n` (not `echo`) or `printf` so no trailing newline is written, e.g.:
+
+```shell
+printf '%s' "$CF_API_TOKEN" | kubectl create secret generic cloudflare-api-key --from-file=apiKey=/dev/stdin
+```
 
 Note. The `CF_API_KEY` and `CF_API_EMAIL` should not be present, if you are using a `CF_API_TOKEN`.
 
@@ -63,6 +38,56 @@ If you would like to further restrict the API permissions to a specific zone (or
 
 Cloudflare API has a [global rate limit of 1,200 requests per five minutes](https://developers.cloudflare.com/fundamentals/api/reference/limits/). Running several fast polling ExternalDNS instances in a given account can easily hit that limit.
 The AWS Provider [docs](./aws.md#throttling) has some recommendations that can be followed here too, but in particular, consider passing `--cloudflare-dns-records-per-page` with a high value (maximum is 5,000).
+
+## Batch API
+
+The Cloudflare provider submits DNS record changes using Cloudflare's [Batch DNS Records API](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/batch/).
+All creates, updates, and deletes for a zone are grouped into transactional chunks and sent in a single API call per chunk,
+significantly reducing the total number of requests made.
+
+The batch API is transactional — if a chunk fails, the entire chunk is rolled back by Cloudflare.
+In that case, ExternalDNS automatically retries each record change in the chunk individually.
+Record types that are not supported by the batch PUT operation (e.g. CAA) are always submitted individually rather than through the batch API.
+SRV records are submitted with Cloudflare's structured SRV data fields for both batch and individual operations.
+
+| Flag | Default | Description |
+| :--- | :------ | :---------- |
+| `--batch-change-size` | `200` | Maximum number of DNS operations (creates + updates + deletes) per batch chunk. |
+| `--batch-change-interval` | `1s` | Pause between consecutive batch chunks. |
+
+## TLSA records
+
+TLSA records ([RFC 6698](https://datatracker.ietf.org/doc/html/rfc6698), the basis of DANE) are supported. Add `TLSA` to
+`--managed-record-types`, since the default managed set is `A`, `AAAA` and `CNAME` only:
+
+```sh
+--managed-record-types=A --managed-record-types=AAAA --managed-record-types=CNAME --managed-record-types=TLSA
+```
+
+Targets use RFC 6698 presentation format, `<usage> <selector> <matchingType> <certificate>`:
+
+```yaml
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: mail-tlsa
+spec:
+  endpoints:
+    - dnsName: _25._tcp.mail.example.com
+      recordType: TLSA
+      recordTTL: 300
+      targets:
+        - 3 1 1 0b9fa5a59eed715c26c1020c711b4f6ec42d58b0015e14337a39dad301c5afc3
+```
+
+The certificate association data is normalised to lowercase hex without separators, so records written by ExternalDNS
+compare equal to the same records read back from Cloudflare.
+
+Two caveats:
+
+- Cloudflare cannot proxy TLSA records, so proxying is always disabled for them regardless of `--cloudflare-proxied`.
+- DANE requires DNSSEC on the zone. Enable it in Cloudflare and add the DS record at your registrar; ExternalDNS does
+  not check this.
 
 ## Deploy ExternalDNS
 
@@ -151,9 +176,10 @@ spec:
     spec:
       containers:
         - name: external-dns
-          image: registry.k8s.io/external-dns/external-dns:v0.20.0
+          image: registry.k8s.io/external-dns/external-dns:v0.23.0
           args:
             - --source=service # ingress is also possible
+            - --policy=upsert-only # prevents ExternalDNS from deleting any records, set --policy=sync to enable full synchronization (including deletions)
             - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
             - --zone-id-filter=023e105f4ecef8ad9ca31a8372d0c353 # (optional) limit to a specific zone.
             - --provider=cloudflare
@@ -232,9 +258,10 @@ spec:
       serviceAccountName: external-dns
       containers:
         - name: external-dns
-          image: registry.k8s.io/external-dns/external-dns:v0.20.0
+          image: registry.k8s.io/external-dns/external-dns:v0.23.0
           args:
             - --source=service # ingress is also possible
+            - --policy=upsert-only # prevents ExternalDNS from deleting any records, set --policy=sync to enable full synchronization (including deletions)
             - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
             - --zone-id-filter=023e105f4ecef8ad9ca31a8372d0c353 # (optional) limit to a specific zone.
             - --provider=cloudflare
@@ -285,8 +312,8 @@ kind: Service
 metadata:
   name: nginx
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: example.com
-    external-dns.alpha.kubernetes.io/ttl: "120" #optional
+    external-dns.kubernetes.io/hostname: example.com
+    external-dns.kubernetes.io/ttl: "120" #optional
 spec:
   selector:
     app: nginx
@@ -304,7 +331,7 @@ By setting the TTL annotation on the service, you have to pass a valid TTL, whic
 This annotation is optional, if you won't set it, it will be 1 (automatic) which is 300.
 For Cloudflare proxied entries, set the TTL annotation to 1 (automatic), or do not set it.
 
-ExternalDNS uses this annotation to determine what services should be registered with DNS.  Removing the annotation
+ExternalDNS uses this annotation to determine what services should be registered with DNS. Removing the annotation
 will cause ExternalDNS to remove the corresponding DNS records.
 
 Create the deployment and service:
@@ -326,6 +353,28 @@ Substitute the zone for the one created above if a different domain was used.
 
 This should show the external IP address of the service as the A record for your domain.
 
+## Managing SRV records
+
+Cloudflare requires SRV records to be sent as structured fields (`priority`, `weight`, `port`, and `target`).
+ExternalDNS accepts SRV targets in the standard form `<priority> <weight> <port> <target>` and converts them for Cloudflare.
+
+For example, the CRD source can manage an SRV record like this:
+
+```yaml
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: caldav
+spec:
+  endpoints:
+    - dnsName: _caldavs._tcp.example.com
+      recordType: SRV
+      targets:
+        - 0 1 443 caldav.example.com.
+```
+
+After synchronization, the Cloudflare SRV record contains priority `0`, weight `1`, port `443`, and target `caldav.example.com`.
+
 ## Cleanup
 
 Now that we have verified that ExternalDNS will automatically manage Cloudflare DNS records, we can delete the tutorial's example:
@@ -337,16 +386,16 @@ kubectl delete -f externaldns.yaml
 
 ## Setting cloudflare-proxied on a per-ingress basis
 
-Using the `external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"` annotation on your ingress, you can specify if the proxy feature of Cloudflare should be enabled for that record. This setting will override the global `--cloudflare-proxied` setting.
+Using the `external-dns.kubernetes.io/cloudflare-proxied: "true"` annotation on your ingress, you can specify if the proxy feature of Cloudflare should be enabled for that record. This setting will override the global `--cloudflare-proxied` setting.
 
-## Setting cloudlfare regional services
+## Setting cloudflare regional services
 
 With Cloudflare regional services you can restrict which data centers can decrypt and serve HTTPS traffic.
 
 Configuration of Cloudflare Regional Services is enabled by the `--cloudflare-regional-services` flag.
 A default region can be defined using the `--cloudflare-region-key` flag.
 
-Using the `external-dns.alpha.kubernetes.io/cloudflare-region-key` annotation on your ingress, you can specify the region for that record.
+Using the `external-dns.kubernetes.io/cloudflare-region-key` annotation on your ingress, you can specify the region for that record.
 
 An empty string will result in no regional hostname configured.
 
@@ -370,9 +419,9 @@ Currently, requires SuperAdmin or Admin role.
 
 ## Setting cloudflare-custom-hostname
 
-Automatic configuration of Cloudflare custom hostnames (using A/CNAME DNS records as custom origin servers) is enabled by the `--cloudflare-custom-hostnames` flag and the `external-dns.alpha.kubernetes.io/cloudflare-custom-hostname: <custom hostname>` annotation.
+Automatic configuration of Cloudflare custom hostnames (using A/CNAME DNS records as custom origin servers) is enabled by the `--cloudflare-custom-hostnames` flag and the `external-dns.kubernetes.io/cloudflare-custom-hostname: <custom hostname>` annotation.
 
-Multiple hostnames are supported via a comma-separated list: `external-dns.alpha.kubernetes.io/cloudflare-custom-hostname: <custom hostname 1>,<custom hostname 2>`.
+Multiple hostnames are supported via a comma-separated list: `external-dns.kubernetes.io/cloudflare-custom-hostname: <custom hostname 1>,<custom hostname 2>`.
 
 See [Cloudflare for Platforms](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/domain-support/) for more information on custom hostnames.
 
@@ -380,26 +429,41 @@ This feature is disabled by default and supports the `--cloudflare-custom-hostna
 
 `--cloudflare-custom-hostnames-certificate-authority` defaults to `none`, which explicitly means no Certificate Authority (CA) is set when using the Cloudflare API. Specifying a custom CA is only possible for enterprise accounts.
 
-The custom hostname DNS must resolve to the Cloudflare DNS record (`external-dns.alpha.kubernetes.io/hostname`) for automatic certificate validation via the HTTP method. It's important to note that the TXT method does not allow automatic validation and is not supported.
+The custom hostname DNS must resolve to the Cloudflare DNS record (`external-dns.kubernetes.io/hostname`) for automatic certificate validation via the HTTP method. It's important to note that the TXT method does not allow automatic validation and is not supported.
 
 Requires [Cloudflare for SaaS](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/) product and "SSL and Certificates" API permission.
-
-**Note:** Due to using the legacy cloudflare-go v0 API for custom hostname management, the custom hostname page size is fixed at 50. This limitation will be addressed in a future migration to the v4 SDK.
 
 ## Setting Cloudflare DNS Record Tags
 
 Cloudflare allows you to add descriptive tags to DNS records. This can be useful for organizing your records.
 For example one can apply tags by environment (`production`, `staging`) or by the team that owns them (`frontend-team`, `backend-team`). ExternalDNS can manage these tags for you.
 
-To assign tags to a DNS record, add the `external-dns.alpha.kubernetes.io/cloudflare-tags` annotation to your Kubernetes resource (like a Service or Ingress). The value should be a comma-separated list of your desired tags.
+To assign tags to a DNS record, add the `external-dns.kubernetes.io/cloudflare-tags` annotation to your Kubernetes resource (like a Service or Ingress). The value should be a comma-separated list of your desired tags.
 
 ```yaml
 metadata:
   annotations:
     # Assigns three tags to the DNS record created from this resource
-    external-dns.alpha.kubernetes.io/cloudflare-tags: "owner:frontend-team, env:dev, component:api"
+    external-dns.kubernetes.io/cloudflare-tags: "owner:frontend-team, env:dev, component:api"
 ```
 
 ## Using CRD source to manage DNS records in Cloudflare
 
 Please refer to the [CRD source documentation](../sources/crd.md#example) for more information.
+
+On a `DNSEndpoint`, the settings above are `providerSpecific` entries, not annotations:
+
+```yaml
+    providerSpecific:
+      - name: cloudflare/proxied
+        value: "true"
+```
+
+Names: `cloudflare/proxied`, `cloudflare/custom-hostname`, `cloudflare/region-key`,
+`cloudflare/record-comment`, `cloudflare/tags`.
+
+Up to v0.22.0 these were named after the annotation
+(`external-dns.kubernetes.io/cloudflare-proxied`), tying a `DNSEndpoint` to
+`--annotation-prefix`.
+
+Still accepted with any prefix, but now deprecated.

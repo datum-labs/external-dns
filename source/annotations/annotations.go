@@ -15,11 +15,17 @@ package annotations
 
 import (
 	"math"
+	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (
 	// DefaultAnnotationPrefix is the default annotation prefix used by external-dns
-	DefaultAnnotationPrefix = "external-dns.alpha.kubernetes.io/"
+	DefaultAnnotationPrefix = "external-dns.kubernetes.io/"
+
+	// LegacyAnnotationPrefix is the annotation prefix used by releases before v0.22.0.
+	LegacyAnnotationPrefix = "external-dns.alpha.kubernetes.io/"
 
 	ttlMinimum = 1
 	ttlMaximum = math.MaxInt32
@@ -30,40 +36,42 @@ var (
 	// to provide easy filtering. Can be customized via SetAnnotationPrefix.
 	AnnotationKeyPrefix = DefaultAnnotationPrefix
 
-	// CloudflareProxiedKey The annotation used for determining if traffic will go through Cloudflare
-	CloudflareProxiedKey        string
-	CloudflareCustomHostnameKey string
-	CloudflareRegionKey         string
-	CloudflareRecordCommentKey  string
-	CloudflareTagsKey           string
+	// legacyAnnotationPrefix is an additional prefix accepted by ResolveLegacyAnnotations. Empty means disabled.
+	legacyAnnotationPrefix string
 
-	AWSPrefix        string
-	CoreDNSPrefix    string
-	SCWPrefix        string
-	WebhookPrefix    string
-	CloudflarePrefix string
+	// AzureTagsKey The annotation used for Azure DNS record tags
+	AzureTagsKey = AnnotationKeyPrefix + "azure-tags"
 
-	TtlKey           string
-	SetIdentifierKey string
-	AliasKey         string
-	TargetKey        string
+	AWSPrefix        = AnnotationKeyPrefix + "aws-"
+	CoreDNSPrefix    = AnnotationKeyPrefix + "coredns-"
+	SCWPrefix        = AnnotationKeyPrefix + "scw-"
+	WebhookPrefix    = AnnotationKeyPrefix + "webhook-"
+	CloudflarePrefix = AnnotationKeyPrefix + "cloudflare-"
+
+	TtlKey           = AnnotationKeyPrefix + "ttl"
+	SetIdentifierKey = AnnotationKeyPrefix + "set-identifier"
+	AliasKey         = AnnotationKeyPrefix + "alias"
+	RecordTypeKey    = AnnotationKeyPrefix + "record-type"
+	TargetKey        = AnnotationKeyPrefix + "target"
 	// ControllerKey The annotation used for figuring out which controller is responsible
-	ControllerKey string
+	ControllerKey = AnnotationKeyPrefix + "controller"
 	// HostnameKey The annotation used for defining the desired hostname
-	HostnameKey string
+	HostnameKey = AnnotationKeyPrefix + "hostname"
 	// AccessKey The annotation used for specifying whether the public or private interface address is used
-	AccessKey string
+	AccessKey = AnnotationKeyPrefix + "access"
 	// EndpointsTypeKey The annotation used for specifying the type of endpoints to use for headless services
-	EndpointsTypeKey string
+	EndpointsTypeKey = AnnotationKeyPrefix + "endpoints-type"
 	// Ingress the annotation used to determine if the gateway is implemented by an Ingress object
-	Ingress string
+	Ingress = AnnotationKeyPrefix + "ingress"
 	// IngressHostnameSourceKey The annotation used to determine the source of hostnames for ingresses.  This is an optional field - all
 	// available hostname sources are used if not specified.
-	IngressHostnameSourceKey string
+	IngressHostnameSourceKey = AnnotationKeyPrefix + "ingress-hostname-source"
 	// ControllerValue The value of the controller annotation so that we feel responsible
 	ControllerValue = "dns-controller"
 	// InternalHostnameKey The annotation used for defining the desired hostname
-	InternalHostnameKey string
+	InternalHostnameKey = AnnotationKeyPrefix + "internal-hostname"
+	// The annotation used for defining the desired hostname source for gateways
+	GatewayHostnameSourceKey = AnnotationKeyPrefix + "gateway-hostname-source"
 )
 
 // SetAnnotationPrefix sets a custom annotation prefix and rebuilds all annotation keys.
@@ -72,12 +80,8 @@ var (
 func SetAnnotationPrefix(prefix string) {
 	AnnotationKeyPrefix = prefix
 
-	// Cloudflare annotations
-	CloudflareProxiedKey = AnnotationKeyPrefix + "cloudflare-proxied"
-	CloudflareCustomHostnameKey = AnnotationKeyPrefix + "cloudflare-custom-hostname"
-	CloudflareRegionKey = AnnotationKeyPrefix + "cloudflare-region-key"
-	CloudflareRecordCommentKey = AnnotationKeyPrefix + "cloudflare-record-comment"
-	CloudflareTagsKey = AnnotationKeyPrefix + "cloudflare-tags"
+	// Azure annotations
+	AzureTagsKey = AnnotationKeyPrefix + "azure-tags"
 
 	// Provider prefixes
 	AWSPrefix = AnnotationKeyPrefix + "aws-"
@@ -90,6 +94,7 @@ func SetAnnotationPrefix(prefix string) {
 	TtlKey = AnnotationKeyPrefix + "ttl"
 	SetIdentifierKey = AnnotationKeyPrefix + "set-identifier"
 	AliasKey = AnnotationKeyPrefix + "alias"
+	RecordTypeKey = AnnotationKeyPrefix + "record-type"
 	TargetKey = AnnotationKeyPrefix + "target"
 	ControllerKey = AnnotationKeyPrefix + "controller"
 	HostnameKey = AnnotationKeyPrefix + "hostname"
@@ -98,4 +103,51 @@ func SetAnnotationPrefix(prefix string) {
 	Ingress = AnnotationKeyPrefix + "ingress"
 	IngressHostnameSourceKey = AnnotationKeyPrefix + "ingress-hostname-source"
 	InternalHostnameKey = AnnotationKeyPrefix + "internal-hostname"
+	GatewayHostnameSourceKey = AnnotationKeyPrefix + "gateway-hostname-source"
+}
+
+// SetLegacyAnnotationPrefix makes ResolveLegacyAnnotations accept annotations carrying prefix in addition
+// to AnnotationKeyPrefix. An empty prefix disables the resolution, as does one that AnnotationKeyPrefix
+// itself starts with: rewriting would then be a no-op or would rewrite its own output.
+func SetLegacyAnnotationPrefix(prefix string) {
+	if strings.HasPrefix(AnnotationKeyPrefix, prefix) {
+		prefix = ""
+	}
+	legacyAnnotationPrefix = prefix
+}
+
+// LegacyAnnotationPrefixEnabled reports whether ResolveLegacyAnnotations has anything to do, so callers
+// on hot paths can skip fetching annotations when the migration aid is off (the default).
+func LegacyAnnotationPrefixEnabled() bool {
+	return legacyAnnotationPrefix != ""
+}
+
+// ResolveLegacyAnnotations adds, in place, an AnnotationKeyPrefix equivalent for every annotation carrying
+// the legacy prefix so that sources read the configured prefix, while the legacy key stays in the map so
+// that --annotation-filter and templates written against it keep matching. When both forms of a key are
+// present the value under AnnotationKeyPrefix wins and the conflict is logged.
+// It returns true when anns was modified and is a no-op unless a legacy prefix was enabled
+// with SetLegacyAnnotationPrefix.
+func ResolveLegacyAnnotations(kind, namespace, name string, anns map[string]string) bool {
+	if legacyAnnotationPrefix == "" {
+		return false
+	}
+	var legacyKeys []string
+	for key := range anns {
+		if strings.HasPrefix(key, legacyAnnotationPrefix) {
+			legacyKeys = append(legacyKeys, key)
+		}
+	}
+	modified := false
+	for _, key := range legacyKeys {
+		value := anns[key]
+		resolved := AnnotationKeyPrefix + strings.TrimPrefix(key, legacyAnnotationPrefix)
+		if existing, ok := anns[resolved]; !ok {
+			anns[resolved] = value
+			modified = true
+		} else if existing != value {
+			log.Warnf("%s %s/%s: ignoring annotation %s=%q because %s=%q is set", kind, namespace, name, key, value, resolved, existing)
+		}
+	}
+	return modified
 }

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"testing"
 
+	"sigs.k8s.io/external-dns/internal/testutils"
+
 	fakeDynamic "k8s.io/client-go/dynamic/fake"
 
 	projectcontour "github.com/projectcontour/contour/apis/projectcontour/v1"
@@ -30,10 +32,14 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/source/annotations"
+	templatetest "sigs.k8s.io/external-dns/source/template/testutil"
+	sourcetypes "sigs.k8s.io/external-dns/source/types"
 )
 
 // This is a compile-time validation that httpProxySource is a Source.
@@ -45,7 +51,7 @@ type HTTPProxySuite struct {
 	httpProxy *projectcontour.HTTPProxy
 }
 
-func newDynamicKubernetesClient() (*fakeDynamic.FakeDynamicClient, *runtime.Scheme) {
+func newContourDynamicKubernetesClient() (*fakeDynamic.FakeDynamicClient, *runtime.Scheme) {
 	s := runtime.NewScheme()
 	_ = projectcontour.AddToScheme(s)
 	return fakeDynamic.NewSimpleDynamicClient(s), s
@@ -60,10 +66,8 @@ type fakeLoadBalancerService struct {
 
 func (ig fakeLoadBalancerService) Service() *v1.Service {
 	svc := &v1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ig.namespace,
-			Name:      ig.name,
-		},
+		Namespace: ig.namespace,
+		Name:      ig.name,
 		Status: v1.ServiceStatus{
 			LoadBalancer: v1.LoadBalancerStatus{
 				Ingress: []v1.LoadBalancerIngress{},
@@ -86,19 +90,19 @@ func (ig fakeLoadBalancerService) Service() *v1.Service {
 }
 
 func (suite *HTTPProxySuite) SetupTest() {
-	fakeDynamicClient, s := newDynamicKubernetesClient()
+	fakeDynamicClient, s := newContourDynamicKubernetesClient()
 	var err error
 
 	suite.source, err = NewContourHTTPProxySource(
 		context.TODO(),
 		fakeDynamicClient,
-		"default",
-		"",
-		"{{.Name}}",
-		false,
-		false,
+		&Config{
+			Namespaces:     []string{"default"},
+			LabelFilter:    labels.Everything(),
+			TemplateEngine: templatetest.MustEngine(suite.T(), "{{.Name}}", "", "", false),
+		},
 	)
-	suite.NoError(err, "should initialize httpproxy source")
+	suite.Require().NoError(err, "should initialize httpproxy source")
 
 	suite.httpProxy = (fakeHTTPProxy{
 		name:      "foo-httpproxy-with-targets",
@@ -108,12 +112,10 @@ func (suite *HTTPProxySuite) SetupTest() {
 
 	// Convert to unstructured
 	unstructuredHTTPProxy, err := convertHTTPProxyToUnstructured(suite.httpProxy, s)
-	if err != nil {
-		suite.Error(err)
-	}
+	suite.Require().NoError(err)
 
 	_, err = fakeDynamicClient.Resource(projectcontour.HTTPProxyGVR).Namespace(suite.httpProxy.Namespace).Create(context.Background(), unstructuredHTTPProxy, metav1.CreateOptions{})
-	suite.NoError(err, "should succeed")
+	suite.Require().NoError(err, "should succeed")
 }
 
 func (suite *HTTPProxySuite) TestResourceLabelIsSet() {
@@ -137,71 +139,6 @@ func TestHTTPProxy(t *testing.T) {
 	suite.Run(t, new(HTTPProxySuite))
 	t.Run("endpointsFromHTTPProxy", testEndpointsFromHTTPProxy)
 	t.Run("Endpoints", testHTTPProxyEndpoints)
-}
-
-func TestNewContourHTTPProxySource(t *testing.T) {
-	t.Parallel()
-
-	for _, ti := range []struct {
-		title                    string
-		annotationFilter         string
-		fqdnTemplate             string
-		combineFQDNAndAnnotation bool
-		expectError              bool
-	}{
-		{
-			title:        "invalid template",
-			expectError:  true,
-			fqdnTemplate: "{{.Name",
-		},
-		{
-			title:       "valid empty template",
-			expectError: false,
-		},
-		{
-			title:        "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com",
-		},
-		{
-			title:        "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-		},
-		{
-			title:                    "valid template",
-			expectError:              false,
-			fqdnTemplate:             "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-			combineFQDNAndAnnotation: true,
-		},
-		{
-			title:            "non-empty annotation filter label",
-			expectError:      false,
-			annotationFilter: "contour.heptio.com/ingress.class=contour",
-		},
-	} {
-
-		t.Run(ti.title, func(t *testing.T) {
-			t.Parallel()
-
-			fakeDynamicClient, _ := newDynamicKubernetesClient()
-
-			_, err := NewContourHTTPProxySource(
-				context.TODO(),
-				fakeDynamicClient,
-				"",
-				ti.annotationFilter,
-				ti.fqdnTemplate,
-				ti.combineFQDNAndAnnotation,
-				false,
-			)
-			if ti.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
 }
 
 func testEndpointsFromHTTPProxy(t *testing.T) {
@@ -283,18 +220,38 @@ func testEndpointsFromHTTPProxy(t *testing.T) {
 			},
 			expected: []*endpoint.Endpoint{},
 		},
+		{
+			title: "provider-specific annotation is converted to endpoint property",
+			httpProxy: fakeHTTPProxy{
+				host: "foo.bar",
+				annotations: map[string]string{
+					annotations.AWSPrefix + "weight": "10",
+				},
+				loadBalancer: fakeLoadBalancerService{
+					ips: []string{"8.8.8.8"},
+				},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "foo.bar",
+					RecordType: endpoint.RecordTypeA,
+					Targets:    endpoint.Targets{"8.8.8.8"},
+					ProviderSpecific: endpoint.ProviderSpecific{
+						{Name: "aws/weight", Value: "10"},
+					},
+				},
+			},
+		},
 	} {
 
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
-			if source, err := newTestHTTPProxySource(); err != nil {
-				require.NoError(t, err)
-			} else if endpoints, err := source.endpointsFromHTTPProxy(ti.httpProxy.HTTPProxy()); err != nil {
-				require.NoError(t, err)
-			} else {
-				validateEndpoints(t, endpoints, ti.expected)
-			}
+			source, err := newTestHTTPProxySource(t)
+			require.NoError(t, err)
+
+			endpoints := source.endpointsFromHTTPProxy(ti.httpProxy.HTTPProxy())
+			testutils.ValidateEndpoints(t, endpoints, ti.expected)
 		})
 	}
 }
@@ -307,6 +264,7 @@ func testHTTPProxyEndpoints(t *testing.T) {
 		title                    string
 		targetNamespace          string
 		annotationFilter         string
+		labelFilter              labels.Selector
 		loadBalancer             fakeLoadBalancerService
 		httpProxyItems           []fakeHTTPProxy
 		expected                 []*endpoint.Endpoint
@@ -446,6 +404,7 @@ func testHTTPProxyEndpoints(t *testing.T) {
 				{
 					name:      "fake1",
 					namespace: namespace,
+					uid:       "contour-httpproxy-uid",
 					annotations: map[string]string{
 						"contour.heptio.com/ingress.class": "contour",
 					},
@@ -453,11 +412,11 @@ func testHTTPProxyEndpoints(t *testing.T) {
 				},
 			},
 			expected: []*endpoint.Endpoint{
-				{
+				(&endpoint.Endpoint{
 					DNSName:    "example.org",
 					RecordType: endpoint.RecordTypeA,
 					Targets:    endpoint.Targets{"8.8.8.8"},
-				},
+				}).WithRefObject(testutils.RefSource(string(sourcetypes.ContourHTTPProxy))),
 			},
 		},
 		{
@@ -480,7 +439,7 @@ func testHTTPProxyEndpoints(t *testing.T) {
 			expected: []*endpoint.Endpoint{},
 		},
 		{
-			title:            "invalid annotation filter expression",
+			title:            "invalid annotation filter expression is silently ignored",
 			targetNamespace:  "",
 			annotationFilter: "contour.heptio.com/ingress.name in (a b)",
 			loadBalancer: fakeLoadBalancerService{
@@ -496,8 +455,13 @@ func testHTTPProxyEndpoints(t *testing.T) {
 					host: "example.org",
 				},
 			},
-			expected:    []*endpoint.Endpoint{},
-			expectError: true,
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "example.org",
+					RecordType: endpoint.RecordTypeA,
+					Targets:    endpoint.Targets{"8.8.8.8"},
+				},
+			},
 		},
 		{
 			title:            "valid matching annotation filter label",
@@ -1046,49 +1010,54 @@ func testHTTPProxyEndpoints(t *testing.T) {
 				httpProxies = append(httpProxies, item.HTTPProxy())
 			}
 
-			fakeDynamicClient, scheme := newDynamicKubernetesClient()
+			fakeDynamicClient, scheme := newContourDynamicKubernetesClient()
 			for _, httpProxy := range httpProxies {
 				converted, err := convertHTTPProxyToUnstructured(httpProxy, scheme)
 				require.NoError(t, err)
-				_, err = fakeDynamicClient.Resource(projectcontour.HTTPProxyGVR).Namespace(httpProxy.Namespace).Create(context.Background(), converted, metav1.CreateOptions{})
+				_, err = fakeDynamicClient.Resource(projectcontour.HTTPProxyGVR).Namespace(httpProxy.Namespace).Create(t.Context(), converted, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
 
+			labelFilter := ti.labelFilter
+			if labelFilter == nil {
+				labelFilter = labels.Everything()
+			}
 			httpProxySource, err := NewContourHTTPProxySource(
-				context.TODO(),
+				t.Context(),
 				fakeDynamicClient,
-				ti.targetNamespace,
-				ti.annotationFilter,
-				ti.fqdnTemplate,
-				ti.combineFQDNAndAnnotation,
-				ti.ignoreHostnameAnnotation,
+				&Config{
+					Namespaces:               []string{ti.targetNamespace},
+					AnnotationFilter:         parseAnnotationFilterOrNil(ti.annotationFilter),
+					LabelFilter:              labelFilter,
+					TemplateEngine:           templatetest.MustEngine(t, ti.fqdnTemplate, "", "", ti.combineFQDNAndAnnotation),
+					IgnoreHostnameAnnotation: ti.ignoreHostnameAnnotation,
+				},
 			)
 			require.NoError(t, err)
 
-			res, err := httpProxySource.Endpoints(context.Background())
+			res, err := httpProxySource.Endpoints(t.Context())
 			if ti.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 
-			validateEndpoints(t, res, ti.expected)
+			testutils.ValidateEndpoints(t, res, ti.expected)
 		})
 	}
 }
 
 // httpproxy specific helper functions
-func newTestHTTPProxySource() (*httpProxySource, error) {
-	fakeDynamicClient, _ := newDynamicKubernetesClient()
+func newTestHTTPProxySource(t *testing.T) (*httpProxySource, error) {
+	fakeDynamicClient, _ := newContourDynamicKubernetesClient()
 
 	src, err := NewContourHTTPProxySource(
-		context.TODO(),
+		t.Context(),
 		fakeDynamicClient,
-		"default",
-		"",
-		"{{.Name}}",
-		false,
-		false,
+		&Config{
+			LabelFilter:    labels.Everything(),
+			TemplateEngine: templatetest.MustEngine(t, "{{.Name}}", "", "", false),
+		},
 	)
 	if err != nil {
 		return nil, err
@@ -1105,6 +1074,7 @@ func newTestHTTPProxySource() (*httpProxySource, error) {
 type fakeHTTPProxy struct {
 	namespace   string
 	name        string
+	uid         string
 	annotations map[string]string
 
 	host         string
@@ -1140,16 +1110,208 @@ func (ir fakeHTTPProxy) HTTPProxy() *projectcontour.HTTPProxy {
 	}
 
 	httpProxy := &projectcontour.HTTPProxy{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   ir.namespace,
-			Name:        ir.name,
-			Annotations: ir.annotations,
-		},
-		Spec: spec,
+		Namespace:   ir.namespace,
+		Name:        ir.name,
+		UID:         k8stypes.UID(ir.uid),
+		Annotations: ir.annotations,
+		Spec:        spec,
 		Status: projectcontour.HTTPProxyStatus{
 			LoadBalancer: lb,
 		},
 	}
 
 	return httpProxy
+}
+
+func TestContourHTTPProxyLabelFilter(t *testing.T) {
+	t.Parallel()
+
+	fakeDynamicClient, scheme := newContourDynamicKubernetesClient()
+
+	for _, hp := range []*projectcontour.HTTPProxy{
+		{
+			Name:      "relevant",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "relevant"},
+			Spec: projectcontour.HTTPProxySpec{
+				VirtualHost: &projectcontour.VirtualHost{Fqdn: "relevant.example.org"},
+			},
+			Status: projectcontour.HTTPProxyStatus{
+				LoadBalancer: v1.LoadBalancerStatus{
+					Ingress: []v1.LoadBalancerIngress{{IP: "1.2.3.4"}},
+				},
+			},
+		},
+		{
+			Name:      "other",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "other"},
+			Spec: projectcontour.HTTPProxySpec{
+				VirtualHost: &projectcontour.VirtualHost{Fqdn: "other.example.org"},
+			},
+			Status: projectcontour.HTTPProxyStatus{
+				LoadBalancer: v1.LoadBalancerStatus{
+					Ingress: []v1.LoadBalancerIngress{{IP: "5.6.7.8"}},
+				},
+			},
+		},
+	} {
+		converted, err := convertHTTPProxyToUnstructured(hp, scheme)
+		require.NoError(t, err)
+		_, err = fakeDynamicClient.Resource(projectcontour.HTTPProxyGVR).Namespace(hp.Namespace).Create(t.Context(), converted, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	src, err := NewContourHTTPProxySource(t.Context(), fakeDynamicClient, &Config{
+		Namespaces:     []string{"default"},
+		LabelFilter:    labels.SelectorFromSet(labels.Set{"app": "relevant"}),
+		TemplateEngine: templatetest.MustEngine(t, "", "", "", false),
+	})
+	require.NoError(t, err)
+
+	endpoints, err := src.Endpoints(t.Context())
+	require.NoError(t, err)
+	testutils.ValidateEndpoints(t, endpoints, []*endpoint.Endpoint{
+		{
+			DNSName:    "relevant.example.org",
+			RecordType: endpoint.RecordTypeA,
+			Targets:    endpoint.Targets{"1.2.3.4"},
+		},
+	})
+}
+
+func TestContourHTTPProxySource_InformerTransform(t *testing.T) {
+	t.Parallel()
+
+	fakeDynamicClient, _ := newContourDynamicKubernetesClient()
+
+	source, err := NewContourHTTPProxySource(t.Context(), fakeDynamicClient, &Config{LabelFilter: labels.Everything()})
+	require.NoError(t, err)
+	require.IsType(t, &httpProxySource{}, source)
+
+	testDynamicInformerTransformHelper(t,
+		projectcontour.HTTPProxyGVR,
+		fakeDynamicClient, source.(*httpProxySource).httpProxyInformer,
+		withRemovedLastAppliedConfigAnnotation(),
+		withRemovedManagedFields(),
+		withRemovedStatusConditions(),
+	)
+}
+
+// TestContourHTTPProxyIndexer verifies that the httpproxy indexer correctly filters resources
+// by annotation filter and label selector at index time, so that only matching resources are
+// returned by Endpoints().
+func TestContourHTTPProxyIndexer(t *testing.T) {
+	t.Parallel()
+
+	makeEntity := func(namespace, name, fqdn, ip string, ann, lbls map[string]string) *projectcontour.HTTPProxy {
+		if ann == nil {
+			ann = map[string]string{}
+		}
+		if lbls == nil {
+			lbls = map[string]string{}
+		}
+		return &projectcontour.HTTPProxy{
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: ann,
+			Labels:      lbls,
+			Spec: projectcontour.HTTPProxySpec{
+				VirtualHost: &projectcontour.VirtualHost{Fqdn: fqdn},
+			},
+			Status: projectcontour.HTTPProxyStatus{
+				LoadBalancer: v1.LoadBalancerStatus{
+					Ingress: []v1.LoadBalancerIngress{{IP: ip}},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name             string
+		annotationFilter string
+		labelFilter      string
+		proxies          []*projectcontour.HTTPProxy
+		expectedCount    int
+	}{
+		{
+			name:          "no filters returns all proxies across namespaces",
+			expectedCount: 3,
+			proxies: []*projectcontour.HTTPProxy{
+				makeEntity("default", "hp1", "a.example.org", "1.2.3.1", nil, nil),
+				makeEntity("staging", "hp2", "b.example.org", "1.2.3.2", nil, nil),
+				makeEntity("production", "hp3", "c.example.org", "1.2.3.3", nil, nil),
+			},
+		},
+		{
+			name:             "annotation filter includes matching proxies",
+			annotationFilter: "tier=frontend",
+			expectedCount:    2,
+			proxies: []*projectcontour.HTTPProxy{
+				makeEntity("default", "hp1", "a.example.org", "1.2.3.1", map[string]string{"tier": "frontend"}, nil),
+				makeEntity("staging", "hp2", "b.example.org", "1.2.3.2", map[string]string{"tier": "frontend"}, nil),
+				makeEntity("production", "hp3", "c.example.org", "1.2.3.3", map[string]string{"tier": "backend"}, nil),
+			},
+		},
+		{
+			name:          "label filter includes matching proxies",
+			labelFilter:   "env=prod",
+			expectedCount: 1,
+			proxies: []*projectcontour.HTTPProxy{
+				makeEntity("default", "hp1", "a.example.org", "1.2.3.1", nil, map[string]string{"env": "prod"}),
+				makeEntity("staging", "hp2", "b.example.org", "1.2.3.2", nil, map[string]string{"env": "staging"}),
+				makeEntity("production", "hp3", "c.example.org", "1.2.3.3", nil, nil),
+			},
+		},
+		{
+			name:             "annotation and label filter combined",
+			annotationFilter: "tier=frontend",
+			labelFilter:      "env=prod",
+			expectedCount:    1,
+			proxies: []*projectcontour.HTTPProxy{
+				makeEntity("default", "hp1", "a.example.org", "1.2.3.1", map[string]string{"tier": "frontend"}, map[string]string{"env": "prod"}),
+				makeEntity("staging", "hp2", "b.example.org", "1.2.3.2", map[string]string{"tier": "frontend"}, map[string]string{"env": "staging"}),
+				makeEntity("production", "hp3", "c.example.org", "1.2.3.3", map[string]string{"tier": "backend"}, map[string]string{"env": "prod"}),
+			},
+		},
+		{
+			name:             "no matches returns empty",
+			annotationFilter: "tier=missing",
+			expectedCount:    0,
+			proxies: []*projectcontour.HTTPProxy{
+				makeEntity("default", "hp1", "a.example.org", "1.2.3.1", map[string]string{"tier": "frontend"}, nil),
+			},
+		},
+		{
+			name:          "controller mismatch is excluded",
+			expectedCount: 0,
+			proxies: []*projectcontour.HTTPProxy{
+				makeEntity("default", "hp1", "a.example.org", "1.2.3.1", map[string]string{annotations.ControllerKey: "other-controller"}, nil),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fakeDynamicClient, scheme := newContourDynamicKubernetesClient()
+			for _, hp := range tt.proxies {
+				converted, err := convertHTTPProxyToUnstructured(hp, scheme)
+				require.NoError(t, err)
+				_, err = fakeDynamicClient.Resource(projectcontour.HTTPProxyGVR).Namespace(hp.Namespace).Create(t.Context(), converted, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+
+			src, err := NewContourHTTPProxySource(t.Context(), fakeDynamicClient, &Config{
+				AnnotationFilter: parseAnnotationFilterOrNil(tt.annotationFilter),
+				LabelFilter:      parseLabelSelectorOrEverything(t, tt.labelFilter),
+			})
+			require.NoError(t, err)
+
+			endpoints, err := src.Endpoints(t.Context())
+			require.NoError(t, err)
+			assert.Len(t, endpoints, tt.expectedCount)
+		})
+	}
 }

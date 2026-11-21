@@ -33,7 +33,9 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/internal/idna"
 	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
+	"sigs.k8s.io/external-dns/pkg/version"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
 
@@ -66,8 +68,8 @@ type OVHProvider struct {
 	DryRun bool
 
 	// EnableCNAMERelativeTarget controls if CNAME target should be sent with relative format.
-	// Previous implementations of the OVHProvider always added a final dot as for absolut format.
-	// Default value is false, all CNAME are transformed into absolut format.
+	// Previous implementations of the OVHProvider always added a final dot as for absolute format.
+	// Default value is false, all CNAME are transformed into absolute format.
 	// Setting this to true will allow relative format to be sent to DNS zone.
 	EnableCNAMERelativeTarget bool
 
@@ -122,14 +124,24 @@ type ovhChange struct {
 	Action int
 }
 
-// NewOVHProvider initializes a new OVH DNS based Provider.
-func NewOVHProvider(ctx context.Context, domainFilter *endpoint.DomainFilter, endpoint string, apiRateLimit int, enableCNAMERelative, dryRun bool) (*OVHProvider, error) {
+// New creates an OVH provider from the given configuration.
+func New(_ context.Context, cfg *externaldns.Config, domainFilter *endpoint.DomainFilter) (provider.Provider, error) {
+	return newProvider(domainFilter, cfg.OVHEndpoint, cfg.OVHApiRateLimit, cfg.OVHEnableCNAMERelative, cfg.DryRun)
+}
+
+// newProvider initializes a new OVH DNS based Provider.
+func newProvider(
+	domainFilter *endpoint.DomainFilter,
+	endpoint string,
+	apiRateLimit int,
+	enableCNAMERelative,
+	dryRun bool) (*OVHProvider, error) {
 	client, err := ovh.NewEndpointClient(endpoint)
 	if err != nil {
 		return nil, err
 	}
 
-	client.UserAgent = externaldns.UserAgent()
+	client.UserAgent = version.UserAgent()
 
 	return &OVHProvider{
 		client:                    client,
@@ -156,7 +168,7 @@ func (p *OVHProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, error)
 	return endpoints, nil
 }
 
-func planChangesByZoneName(zones []string, changes *plan.Changes) map[string]*plan.Changes {
+func planChangesByZoneName(zones []string, changes *plan.Changes) (map[string]*plan.Changes, error) {
 	zoneNameIDMapper := provider.ZoneIDName{}
 	for _, zone := range zones {
 		zoneNameIDMapper.Add(zone, zone)
@@ -164,35 +176,47 @@ func planChangesByZoneName(zones []string, changes *plan.Changes) map[string]*pl
 
 	output := map[string]*plan.Changes{}
 	for _, endpt := range changes.Delete {
-		_, zoneName := zoneNameIDMapper.FindZone(endpt.DNSName)
+		zoneName, _ := zoneNameIDMapper.FindZone(endpt.DNSName)
+		if zoneName == "" {
+			return nil, provider.NewSoftErrorf("record %q have not found matching DNS zone in OVH provider", endpt.DNSName)
+		}
 		if _, ok := output[zoneName]; !ok {
 			output[zoneName] = &plan.Changes{}
 		}
 		output[zoneName].Delete = append(output[zoneName].Delete, endpt)
 	}
 	for _, endpt := range changes.Create {
-		_, zoneName := zoneNameIDMapper.FindZone(endpt.DNSName)
+		zoneName, _ := zoneNameIDMapper.FindZone(endpt.DNSName)
+		if zoneName == "" {
+			return nil, provider.NewSoftErrorf("record %q have not found matching DNS zone in OVH provider", endpt.DNSName)
+		}
 		if _, ok := output[zoneName]; !ok {
 			output[zoneName] = &plan.Changes{}
 		}
 		output[zoneName].Create = append(output[zoneName].Create, endpt)
 	}
 	for _, endpt := range changes.UpdateOld {
-		_, zoneName := zoneNameIDMapper.FindZone(endpt.DNSName)
+		zoneName, _ := zoneNameIDMapper.FindZone(endpt.DNSName)
+		if zoneName == "" {
+			return nil, provider.NewSoftErrorf("record %q have not found matching DNS zone in OVH provider", endpt.DNSName)
+		}
 		if _, ok := output[zoneName]; !ok {
 			output[zoneName] = &plan.Changes{}
 		}
 		output[zoneName].UpdateOld = append(output[zoneName].UpdateOld, endpt)
 	}
 	for _, endpt := range changes.UpdateNew {
-		_, zoneName := zoneNameIDMapper.FindZone(endpt.DNSName)
+		zoneName, _ := zoneNameIDMapper.FindZone(endpt.DNSName)
+		if zoneName == "" {
+			return nil, provider.NewSoftErrorf("record %q have not found matching DNS zone in OVH provider", endpt.DNSName)
+		}
 		if _, ok := output[zoneName]; !ok {
 			output[zoneName] = &plan.Changes{}
 		}
 		output[zoneName].UpdateNew = append(output[zoneName].UpdateNew, endpt)
 	}
 
-	return output
+	return output, nil
 }
 
 func (p *OVHProvider) computeSingleZoneChanges(_ context.Context, zoneName string, existingRecords []ovhRecord, changes *plan.Changes) ([]ovhChange, error) {
@@ -264,7 +288,10 @@ func (p *OVHProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) e
 		}
 	}
 
-	changesByZoneName := planChangesByZoneName(zones, changes)
+	changesByZoneName, err := planChangesByZoneName(zones, changes)
+	if err != nil {
+		return err
+	}
 	eg, ctx := errgroup.WithContext(ctx)
 
 	for zoneName, changes := range changesByZoneName {
@@ -503,18 +530,12 @@ func (p *OVHProvider) newOvhChangeCreateDelete(action int, endpoints []*endpoint
 	for _, e := range endpoints {
 		for _, target := range e.Targets {
 			change := ovhChange{
-				Action: action,
-				ovhRecord: ovhRecord{
-					Zone: zone,
-					ovhRecordFields: ovhRecordFields{
-						FieldType: e.RecordType,
-						ovhRecordFieldUpdate: ovhRecordFieldUpdate{
-							SubDomain: convertDNSNameIntoSubDomain(e.DNSName, zone),
-							TTL:       defaultTTL,
-							Target:    target,
-						},
-					},
-				},
+				Action:    action,
+				Zone:      zone,
+				FieldType: e.RecordType,
+				SubDomain: convertDNSNameIntoSubDomain(e.DNSName, zone),
+				TTL:       defaultTTL,
+				Target:    target,
 			}
 			p.formatCNAMETarget(&change)
 			if e.RecordTTL.IsConfigured() {
@@ -555,6 +576,13 @@ func (p *OVHProvider) newOvhChangeCreateDelete(action int, endpoints []*endpoint
 func convertDNSNameIntoSubDomain(DNSName string, zoneName string) string { // nolint: gocritic // captLocal
 	if DNSName == zoneName {
 		return ""
+	}
+
+	if name, err := idna.Profile.ToUnicode(DNSName); err == nil {
+		DNSName = name
+	}
+	if name, err := idna.Profile.ToUnicode(zoneName); err == nil {
+		zoneName = name
 	}
 
 	return strings.TrimSuffix(DNSName, "."+zoneName)
@@ -659,18 +687,12 @@ func (p *OVHProvider) newOvhChangeUpdate(endpointsOld []*endpoint.Endpoint, endp
 				}
 
 				change := ovhChange{
-					Action: ovhCreate,
-					ovhRecord: ovhRecord{
-						Zone: zone,
-						ovhRecordFields: ovhRecordFields{
-							FieldType: endpointsNew.RecordType,
-							ovhRecordFieldUpdate: ovhRecordFieldUpdate{
-								SubDomain: convertDNSNameIntoSubDomain(endpointsNew.DNSName, zone),
-								TTL:       recordTTL,
-								Target:    target,
-							},
-						},
-					},
+					Action:    ovhCreate,
+					Zone:      zone,
+					FieldType: endpointsNew.RecordType,
+					SubDomain: convertDNSNameIntoSubDomain(endpointsNew.DNSName, zone),
+					TTL:       recordTTL,
+					Target:    target,
 				}
 				p.formatCNAMETarget(&change)
 				changes = append(changes, change)

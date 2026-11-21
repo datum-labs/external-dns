@@ -20,26 +20,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
-	"github.com/cloudfoundry-community/go-cfclient"
 	openshift "github.com/openshift/client-go/route/clientset/versioned"
 	log "github.com/sirupsen/logrus"
+	rgversioned "github.com/szuecs/routegroup-client/client/clientset/versioned"
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	gateway "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 
-	"sigs.k8s.io/external-dns/source/types"
-
-	extdnshttp "sigs.k8s.io/external-dns/pkg/http"
-
 	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
+	kubeclient "sigs.k8s.io/external-dns/pkg/client"
+	"sigs.k8s.io/external-dns/pkg/crd"
+	"sigs.k8s.io/external-dns/source/annotations"
+	"sigs.k8s.io/external-dns/source/template"
+	"sigs.k8s.io/external-dns/source/types"
 )
 
 // ErrSourceNotFound is returned when a requested source doesn't exist.
@@ -51,8 +51,8 @@ var ErrSourceNotFound = errors.New("source not found")
 // config object is passed rather than individual parameters.
 //
 // Common Configuration Fields:
-// - Namespace: Target namespace for source operations
-// - AnnotationFilter: Filter sources by annotation patterns
+// - Namespaces: Target namespaces for source operations, empty for all of them
+// - AnnotationFilter: Filter sources by annotation selector
 // - LabelFilter: Filter sources by label selectors
 // - FQDNTemplate: Template for generating fully qualified domain names
 // - CombineFQDNAndAnnotation: Whether to combine FQDN template with annotations
@@ -61,12 +61,11 @@ var ErrSourceNotFound = errors.New("source not found")
 // The config is created from externaldns.Config via NewSourceConfig() which handles
 // type conversions and validation.
 type Config struct {
-	Namespace                      string
-	AnnotationFilter               string
+	Namespaces                     []string
+	AnnotationFilter               labels.Selector
 	LabelFilter                    labels.Selector
 	IngressClassNames              []string
-	FQDNTemplate                   string
-	CombineFQDNAndAnnotation       bool
+	TemplateEngine                 template.Engine
 	IgnoreHostnameAnnotation       bool
 	IgnoreNonHostNetworkPods       bool
 	IgnoreIngressTLSSpec           bool
@@ -75,7 +74,9 @@ type Config struct {
 	GatewayName                    string
 	GatewayNamespace               string
 	GatewayLabelFilter             string
+	GatewayListenerSets            bool
 	Compatibility                  string
+	Provider                       string
 	PodSourceDomain                string
 	PublishInternal                bool
 	PublishHostIP                  bool
@@ -86,12 +87,10 @@ type Config struct {
 	KubeConfig                     string
 	APIServerURL                   string
 	ServiceTypeFilter              []string
-	CFAPIEndpoint                  string
-	CFUsername                     string
-	CFPassword                     string
 	GlooNamespaces                 []string
-	SkipperRouteGroupVersion       string
-	RequestTimeout                 time.Duration
+	KubeAPIRequestTimeout          time.Duration
+	KubeAPIQPS                     int
+	KubeAPIBurst                   int
 	DefaultTargets                 []string
 	ForceDefaultTargets            bool
 	OCPRouterName                  string
@@ -101,18 +100,69 @@ type Config struct {
 	TraefikDisableNew              bool
 	ExcludeUnschedulable           bool
 	ExposeInternalIPv6             bool
+	ExcludeTargetNets              []string
+	TargetNetFilter                []string
+	NAT64Networks                  []string
+	MinTTL                         time.Duration
+	UnstructuredResources          []string
+	PreferAlias                    bool
+	PTRSupported                   bool
+	CreatePTR                      bool
+
+	sources []string
+
+	// clientGen is lazily initialized on first access for efficiency.
+	// It may be overridden at construction time via WithClientGenerator.
+	clientGen     ClientGenerator
+	clientGenOnce sync.Once
+
+	// crdClients lets callers outside this package reuse the crd source's client
+	// instead of building a second one.
+	crdClients *crd.CRDClients
 }
 
-func NewSourceConfig(cfg *externaldns.Config) *Config {
-	// error is explicitly ignored because the filter is already validated in validation.ValidateConfig
-	labelSelector, _ := labels.Parse(cfg.LabelFilter)
-	return &Config{
-		Namespace:                      cfg.Namespace,
-		AnnotationFilter:               cfg.AnnotationFilter,
+// CRDClients returns the reader/writer built for the crd source, or nil if the
+// crd source was not built.
+func (cfg *Config) CRDClients() *crd.CRDClients {
+	return cfg.crdClients
+}
+
+// OverrideConfigOption configures a Config.
+type OverrideConfigOption func(*Config)
+
+// WithClientGenerator sets a custom ClientGenerator, overriding the default
+// SingletonClientGenerator. Intended for testing.
+func WithClientGenerator(gen ClientGenerator) OverrideConfigOption {
+	return func(cfg *Config) {
+		cfg.clientGen = gen
+	}
+}
+
+// WithCRDClients overrides the crd source's clients. Intended for testing.
+func WithCRDClients(cc *crd.CRDClients) OverrideConfigOption {
+	return func(cfg *Config) {
+		cfg.crdClients = cc
+	}
+}
+
+func NewSourceConfig(cfg *externaldns.Config, opts ...OverrideConfigOption) (*Config, error) {
+	labelSelector, err := labels.Parse(cfg.LabelFilter)
+	if err != nil {
+		return nil, fmt.Errorf("label filter: %w", err)
+	}
+	annotationSelector, err := annotations.ParseFilter(cfg.AnnotationFilter)
+	if err != nil {
+		return nil, fmt.Errorf("annotation filter: %w", err)
+	}
+	tmpls, err := template.NewEngine(cfg.FQDNTemplate, cfg.TargetTemplate, cfg.FQDNTargetTemplate, cfg.CombineFQDNAndAnnotation)
+	if err != nil {
+		return nil, err
+	}
+	c := &Config{
+		Namespaces:                     externaldns.NormalizeNamespaces(cfg.Namespaces),
+		AnnotationFilter:               annotationSelector,
 		LabelFilter:                    labelSelector,
 		IngressClassNames:              cfg.IngressClassNames,
-		FQDNTemplate:                   cfg.FQDNTemplate,
-		CombineFQDNAndAnnotation:       cfg.CombineFQDNAndAnnotation,
 		IgnoreHostnameAnnotation:       cfg.IgnoreHostnameAnnotation,
 		IgnoreNonHostNetworkPods:       cfg.IgnoreNonHostNetworkPods,
 		IgnoreIngressTLSSpec:           cfg.IgnoreIngressTLSSpec,
@@ -121,10 +171,12 @@ func NewSourceConfig(cfg *externaldns.Config) *Config {
 		GatewayName:                    cfg.GatewayName,
 		GatewayNamespace:               cfg.GatewayNamespace,
 		GatewayLabelFilter:             cfg.GatewayLabelFilter,
+		GatewayListenerSets:            cfg.GatewayListenerSets,
 		Compatibility:                  cfg.Compatibility,
 		PodSourceDomain:                cfg.PodSourceDomain,
 		PublishInternal:                cfg.PublishInternal,
 		PublishHostIP:                  cfg.PublishHostIP,
+		Provider:                       cfg.Provider,
 		AlwaysPublishNotReadyAddresses: cfg.AlwaysPublishNotReadyAddresses,
 		ConnectorServer:                cfg.ConnectorSourceServer,
 		CRDSourceAPIVersion:            cfg.CRDSourceAPIVersion,
@@ -132,12 +184,10 @@ func NewSourceConfig(cfg *externaldns.Config) *Config {
 		KubeConfig:                     cfg.KubeConfig,
 		APIServerURL:                   cfg.APIServerURL,
 		ServiceTypeFilter:              cfg.ServiceTypeFilter,
-		CFAPIEndpoint:                  cfg.CFAPIEndpoint,
-		CFUsername:                     cfg.CFUsername,
-		CFPassword:                     cfg.CFPassword,
 		GlooNamespaces:                 cfg.GlooNamespaces,
-		SkipperRouteGroupVersion:       cfg.SkipperRouteGroupVersion,
-		RequestTimeout:                 cfg.RequestTimeout,
+		KubeAPIRequestTimeout:          cfg.KubeAPIRequestTimeout,
+		KubeAPIQPS:                     cfg.KubeAPIQPS,
+		KubeAPIBurst:                   cfg.KubeAPIBurst,
 		DefaultTargets:                 cfg.DefaultTargets,
 		ForceDefaultTargets:            cfg.ForceDefaultTargets,
 		OCPRouterName:                  cfg.OCPRouterName,
@@ -147,7 +197,59 @@ func NewSourceConfig(cfg *externaldns.Config) *Config {
 		TraefikDisableNew:              cfg.TraefikDisableNew,
 		ExcludeUnschedulable:           cfg.ExcludeUnschedulable,
 		ExposeInternalIPv6:             cfg.ExposeInternalIPV6,
+		ExcludeTargetNets:              cfg.ExcludeTargetNets,
+		TargetNetFilter:                cfg.TargetNetFilter,
+		NAT64Networks:                  cfg.NAT64Networks,
+		MinTTL:                         cfg.MinTTL,
+		UnstructuredResources:          cfg.UnstructuredResources,
+		TemplateEngine:                 tmpls,
+		PreferAlias:                    cfg.PreferAlias,
+		PTRSupported:                   cfg.IsPTRSupported(),
+		CreatePTR:                      cfg.CreatePTR,
+		sources:                        cfg.Sources,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
+// Namespace returns the namespace watched by sources supporting a single one,
+// which ValidateConfig guarantees. Empty means all namespaces.
+func (cfg *Config) Namespace() string {
+	if len(cfg.Namespaces) == 0 {
+		return v1.NamespaceAll
+	}
+	return cfg.Namespaces[0]
+}
+
+// ClientGenerator returns the ClientGenerator for this Config.
+// If one was not provided via WithClientGenerator, a SingletonClientGenerator is
+// lazily created from the Config's connection settings.
+//
+// The timeout behavior is special-cased: when UpdateEvents is true, the timeout is set to 0
+// (no timeout) to allow long-running watch operations for event-driven source updates.
+func (cfg *Config) ClientGenerator() ClientGenerator {
+	cfg.clientGenOnce.Do(func() {
+		// nil-check is intentional: WithClientGenerator may have pre-set clientGen
+		// at construction time. sync.Once ensures thread-safe lazy init for the
+		// default case without overwriting an injected generator.
+		if cfg.clientGen == nil {
+			cfg.clientGen = &SingletonClientGenerator{
+				KubeConfig:   cfg.KubeConfig,
+				APIServerURL: cfg.APIServerURL,
+				RequestTimeout: func() time.Duration {
+					if cfg.UpdateEvents {
+						return 0
+					}
+					return cfg.KubeAPIRequestTimeout
+				}(),
+				QPS:   cfg.KubeAPIQPS,
+				Burst: cfg.KubeAPIBurst,
+			}
+		}
+	})
+	return cfg.clientGen
 }
 
 // ClientGenerator provides clients for various Kubernetes APIs and external services.
@@ -159,9 +261,9 @@ func NewSourceConfig(cfg *externaldns.Config) *Config {
 // - KubeClient: Standard Kubernetes API client
 // - GatewayClient: Gateway API client for Gateway resources
 // - IstioClient: Istio service mesh client
-// - CloudFoundryClient: CloudFoundry platform client
 // - DynamicKubernetesClient: Dynamic client for custom resources
 // - OpenShiftClient: OpenShift-specific client for Route resources
+// - RESTConfig: Instrumented REST config for creating custom clients
 //
 // The singleton behavior is implemented in SingletonClientGenerator which uses
 // sync.Once to guarantee single initialization of each client type.
@@ -169,9 +271,9 @@ type ClientGenerator interface {
 	KubeClient() (kubernetes.Interface, error)
 	GatewayClient() (gateway.Interface, error)
 	IstioClient() (istioclient.Interface, error)
-	CloudFoundryClient(cfAPPEndpoint string, cfUsername string, cfPassword string) (*cfclient.Client, error)
 	DynamicKubernetesClient() (dynamic.Interface, error)
 	OpenShiftClient() (openshift.Interface, error)
+	RESTConfig() (*rest.Config, error)
 }
 
 // SingletonClientGenerator stores provider clients and guarantees that only one instance of each client
@@ -183,112 +285,125 @@ type ClientGenerator interface {
 // Memory Efficiency: Prevents creating multiple instances of expensive client objects
 // that maintain their own connection pools and caches.
 //
-// Configuration: Clients are configured using KubeConfig, APIServerURL, and RequestTimeout
-// which are set during SingletonClientGenerator initialization.
+// Configuration: Clients are configured using KubeConfig, APIServerURL, RequestTimeout,
+// QPS, and Burst which are set during SingletonClientGenerator initialization.
 type SingletonClientGenerator struct {
-	KubeConfig      string
-	APIServerURL    string
-	RequestTimeout  time.Duration
-	kubeClient      kubernetes.Interface
-	gatewayClient   gateway.Interface
-	istioClient     *istioclient.Clientset
-	cfClient        *cfclient.Client
-	dynKubeClient   dynamic.Interface
-	openshiftClient openshift.Interface
-	kubeOnce        sync.Once
-	gatewayOnce     sync.Once
-	istioOnce       sync.Once
-	cfOnce          sync.Once
-	dynCliOnce      sync.Once
-	openshiftOnce   sync.Once
+	KubeConfig         string
+	APIServerURL       string
+	RequestTimeout     time.Duration
+	QPS                int
+	Burst              int
+	restConfig         *rest.Config
+	restConfigErr      error
+	kubeClient         kubernetes.Interface
+	kubeClientErr      error
+	gatewayClient      gateway.Interface
+	gatewayClientErr   error
+	istioClient        *istioclient.Clientset
+	istioClientErr     error
+	dynKubeClient      dynamic.Interface
+	dynKubeClientErr   error
+	openshiftClient    openshift.Interface
+	openshiftClientErr error
+	restConfigOnce     sync.Once
+	kubeOnce           sync.Once
+	gatewayOnce        sync.Once
+	istioOnce          sync.Once
+	dynCliOnce         sync.Once
+	openshiftOnce      sync.Once
 }
 
 // KubeClient generates a kube client if it was not created before
 func (p *SingletonClientGenerator) KubeClient() (kubernetes.Interface, error) {
-	var err error
 	p.kubeOnce.Do(func() {
-		p.kubeClient, err = NewKubeClient(p.KubeConfig, p.APIServerURL, p.RequestTimeout)
+		var config *rest.Config
+		config, p.kubeClientErr = p.RESTConfig()
+		if p.kubeClientErr != nil {
+			return
+		}
+		p.kubeClient, p.kubeClientErr = kubeclient.NewKubeClient(config)
 	})
-	return p.kubeClient, err
+	return p.kubeClient, p.kubeClientErr
+}
+
+// RESTConfig generates an instrumented REST config if it was not created before.
+// The config includes request timeout handling and metrics instrumentation.
+// This is useful for sources that need to create custom clients (e.g., controller-runtime clients).
+func (p *SingletonClientGenerator) RESTConfig() (*rest.Config, error) {
+	p.restConfigOnce.Do(func() {
+		p.restConfig, p.restConfigErr = kubeclient.InstrumentedRESTConfig(p.KubeConfig, p.APIServerURL, p.RequestTimeout, p.QPS, p.Burst)
+	})
+	return p.restConfig, p.restConfigErr
 }
 
 // GatewayClient generates a gateway client if it was not created before
 func (p *SingletonClientGenerator) GatewayClient() (gateway.Interface, error) {
-	var err error
 	p.gatewayOnce.Do(func() {
-		p.gatewayClient, err = newGatewayClient(p.KubeConfig, p.APIServerURL, p.RequestTimeout)
+		var config *rest.Config
+		config, p.gatewayClientErr = p.RESTConfig()
+		if p.gatewayClientErr != nil {
+			return
+		}
+		p.gatewayClient, p.gatewayClientErr = gateway.NewForConfig(config)
+		if p.gatewayClientErr != nil {
+			return
+		}
+		log.Infof("Created GatewayAPI client %s", config.Host)
 	})
-	return p.gatewayClient, err
-}
-
-func newGatewayClient(kubeConfig, apiServerURL string, requestTimeout time.Duration) (gateway.Interface, error) {
-	config, err := instrumentedRESTConfig(kubeConfig, apiServerURL, requestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	client, err := gateway.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	log.Infof("Created GatewayAPI client %s", config.Host)
-	return client, nil
+	return p.gatewayClient, p.gatewayClientErr
 }
 
 // IstioClient generates an istio go client if it was not created before
 func (p *SingletonClientGenerator) IstioClient() (istioclient.Interface, error) {
-	var err error
 	p.istioOnce.Do(func() {
-		p.istioClient, err = NewIstioClient(p.KubeConfig, p.APIServerURL)
+		var config *rest.Config
+		config, p.istioClientErr = p.RESTConfig()
+		if p.istioClientErr != nil {
+			return
+		}
+		p.istioClient, p.istioClientErr = NewIstioClient(config)
 	})
-	return p.istioClient, err
-}
-
-// CloudFoundryClient generates a cf client if it was not created before
-func (p *SingletonClientGenerator) CloudFoundryClient(cfAPIEndpoint string, cfUsername string, cfPassword string) (*cfclient.Client, error) {
-	var err error
-	p.cfOnce.Do(func() {
-		p.cfClient, err = NewCFClient(cfAPIEndpoint, cfUsername, cfPassword)
-	})
-	return p.cfClient, err
-}
-
-// NewCFClient return a new CF client object.
-func NewCFClient(cfAPIEndpoint string, cfUsername string, cfPassword string) (*cfclient.Client, error) {
-	c := &cfclient.Config{
-		ApiAddress: "https://" + cfAPIEndpoint,
-		Username:   cfUsername,
-		Password:   cfPassword,
-	}
-	client, err := cfclient.NewClient(c)
-	if err != nil {
-		return nil, err
-	}
-
-	return client, nil
+	return p.istioClient, p.istioClientErr
 }
 
 // DynamicKubernetesClient generates a dynamic client if it was not created before
 func (p *SingletonClientGenerator) DynamicKubernetesClient() (dynamic.Interface, error) {
-	var err error
 	p.dynCliOnce.Do(func() {
-		p.dynKubeClient, err = NewDynamicKubernetesClient(p.KubeConfig, p.APIServerURL, p.RequestTimeout)
+		var config *rest.Config
+		config, p.dynKubeClientErr = p.RESTConfig()
+		if p.dynKubeClientErr != nil {
+			return
+		}
+		p.dynKubeClient, p.dynKubeClientErr = dynamic.NewForConfig(config)
+		if p.dynKubeClientErr != nil {
+			return
+		}
+		log.Infof("Created Dynamic Kubernetes client %s", config.Host)
 	})
-	return p.dynKubeClient, err
+	return p.dynKubeClient, p.dynKubeClientErr
 }
 
 // OpenShiftClient generates an openshift client if it was not created before
 func (p *SingletonClientGenerator) OpenShiftClient() (openshift.Interface, error) {
-	var err error
 	p.openshiftOnce.Do(func() {
-		p.openshiftClient, err = NewOpenShiftClient(p.KubeConfig, p.APIServerURL, p.RequestTimeout)
+		var config *rest.Config
+		config, p.openshiftClientErr = p.RESTConfig()
+		if p.openshiftClientErr != nil {
+			return
+		}
+		p.openshiftClient, p.openshiftClientErr = openshift.NewForConfig(config)
+		if p.openshiftClientErr != nil {
+			return
+		}
+		log.Infof("Created OpenShift client %s", config.Host)
 	})
-	return p.openshiftClient, err
+	return p.openshiftClient, p.openshiftClientErr
 }
 
 // ByNames returns multiple Sources given multiple names.
-func ByNames(ctx context.Context, p ClientGenerator, names []string, cfg *Config) ([]Source, error) {
-	sources := []Source{}
-	for _, name := range names {
+func ByNames(ctx context.Context, cfg *Config, p ClientGenerator) ([]Source, error) {
+	sources := make([]Source, 0, len(cfg.sources))
+	for _, name := range cfg.sources {
 		source, err := BuildWithConfig(ctx, name, p, cfg)
 		if err != nil {
 			return nil, err
@@ -315,7 +430,6 @@ func ByNames(ctx context.Context, p ClientGenerator, names []string, cfg *Config
 // - "pod": Kubernetes pods
 // - "gateway-*": Gateway API resources (httproute, grpcroute, tlsroute, tcproute, udproute)
 // - "istio-*": Istio resources (gateway, virtualservice)
-// - "cloudfoundry": CloudFoundry applications
 // - "ambassador-host": Ambassador Host resources
 // - "contour-httpproxy": Contour HTTPProxy resources
 // - "gloo-proxy": Gloo proxy resources
@@ -326,11 +440,18 @@ func ByNames(ctx context.Context, p ClientGenerator, names []string, cfg *Config
 // - "kong-tcpingress": Kong TCP Ingress resources
 // - "f5-*": F5 resources (virtualserver, transportserver)
 // - "fake": Fake source for testing
+// - "empty": Returns no endpoints, for testing or as a placeholder
 // - "connector": Connector source for external systems
 //
 // Design Note: Gateway API sources use a different pattern (direct constructor calls)
 // because they have simpler initialization requirements.
 func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg *Config) (Source, error) {
+	// Scope the template engine to this source so templates can use isSource "name".
+	var err error
+	if cfg.TemplateEngine, err = cfg.TemplateEngine.WithSource(source); err != nil {
+		return nil, err
+	}
+
 	switch source {
 	case types.Node:
 		return buildNodeSource(ctx, p, cfg)
@@ -341,21 +462,19 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 	case types.Pod:
 		return buildPodSource(ctx, p, cfg)
 	case types.GatewayHttpRoute:
-		return NewGatewayHTTPRouteSource(p, cfg)
+		return NewGatewayHTTPRouteSource(ctx, p, cfg)
 	case types.GatewayGrpcRoute:
-		return NewGatewayGRPCRouteSource(p, cfg)
+		return NewGatewayGRPCRouteSource(ctx, p, cfg)
 	case types.GatewayTlsRoute:
-		return NewGatewayTLSRouteSource(p, cfg)
+		return NewGatewayTLSRouteSource(ctx, p, cfg)
 	case types.GatewayTcpRoute:
-		return NewGatewayTCPRouteSource(p, cfg)
+		return NewGatewayTCPRouteSource(ctx, p, cfg)
 	case types.GatewayUdpRoute:
-		return NewGatewayUDPRouteSource(p, cfg)
+		return NewGatewayUDPRouteSource(ctx, p, cfg)
 	case types.IstioGateway:
 		return buildIstioGatewaySource(ctx, p, cfg)
 	case types.IstioVirtualService:
 		return buildIstioVirtualServiceSource(ctx, p, cfg)
-	case types.Cloudfoundry:
-		return buildCloudFoundrySource(ctx, p, cfg)
 	case types.AmbassadorHost:
 		return buildAmbassadorHostSource(ctx, p, cfg)
 	case types.ContourHTTPProxy:
@@ -367,19 +486,23 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 	case types.OpenShiftRoute:
 		return buildOpenShiftRouteSource(ctx, p, cfg)
 	case types.Fake:
-		return NewFakeSource(cfg.FQDNTemplate)
+		return NewFakeSource(cfg)
+	case types.Empty:
+		return NewEmptySource(), nil
 	case types.Connector:
 		return NewConnectorSource(cfg.ConnectorServer)
 	case types.CRD:
 		return buildCRDSource(ctx, p, cfg)
 	case types.SkipperRouteGroup:
-		return buildSkipperRouteGroupSource(ctx, cfg)
+		return buildSkipperRouteGroupSource(ctx, p, cfg)
 	case types.KongTCPIngress:
 		return buildKongTCPIngressSource(ctx, p, cfg)
 	case types.F5VirtualServer:
 		return buildF5VirtualServerSource(ctx, p, cfg)
 	case types.F5TransportServer:
 		return buildF5TransportServerSource(ctx, p, cfg)
+	case types.Unstructured:
+		return buildUnstructuredSource(ctx, p, cfg)
 	}
 	return nil, ErrSourceNotFound
 }
@@ -419,7 +542,7 @@ func buildNodeSource(ctx context.Context, p ClientGenerator, cfg *Config) (Sourc
 	if err != nil {
 		return nil, err
 	}
-	return NewNodeSource(ctx, client, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.LabelFilter, cfg.ExposeInternalIPv6, cfg.ExcludeUnschedulable, cfg.CombineFQDNAndAnnotation)
+	return NewNodeSource(ctx, client, cfg)
 }
 
 // buildServiceSource creates a Service source for exposing Kubernetes services as DNS records.
@@ -429,7 +552,7 @@ func buildServiceSource(ctx context.Context, p ClientGenerator, cfg *Config) (So
 	if err != nil {
 		return nil, err
 	}
-	return NewServiceSource(ctx, client, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.Compatibility, cfg.PublishInternal, cfg.PublishHostIP, cfg.AlwaysPublishNotReadyAddresses, cfg.ServiceTypeFilter, cfg.IgnoreHostnameAnnotation, cfg.LabelFilter, cfg.ResolveLoadBalancerHostname, cfg.ListenEndpointEvents, cfg.ExposeInternalIPv6)
+	return NewServiceSource(ctx, client, cfg)
 }
 
 // buildIngressSource creates an Ingress source for exposing Kubernetes ingresses as DNS records.
@@ -439,7 +562,7 @@ func buildIngressSource(ctx context.Context, p ClientGenerator, cfg *Config) (So
 	if err != nil {
 		return nil, err
 	}
-	return NewIngressSource(ctx, client, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.IgnoreHostnameAnnotation, cfg.IgnoreIngressTLSSpec, cfg.IgnoreIngressRulesSpec, cfg.LabelFilter, cfg.IngressClassNames)
+	return NewIngressSource(ctx, client, cfg)
 }
 
 // buildPodSource creates a Pod source for exposing Kubernetes pods as DNS records.
@@ -449,7 +572,7 @@ func buildPodSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source
 	if err != nil {
 		return nil, err
 	}
-	return NewPodSource(ctx, client, cfg.Namespace, cfg.Compatibility, cfg.IgnoreNonHostNetworkPods, cfg.PodSourceDomain, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.AnnotationFilter, cfg.LabelFilter)
+	return NewPodSource(ctx, client, cfg)
 }
 
 // buildIstioGatewaySource creates an Istio Gateway source for exposing Istio gateways as DNS records.
@@ -463,7 +586,7 @@ func buildIstioGatewaySource(ctx context.Context, p ClientGenerator, cfg *Config
 	if err != nil {
 		return nil, err
 	}
-	return NewIstioGatewaySource(ctx, kubernetesClient, istioClient, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.IgnoreHostnameAnnotation)
+	return NewIstioGatewaySource(ctx, kubernetesClient, istioClient, cfg)
 }
 
 // buildIstioVirtualServiceSource creates an Istio VirtualService source for exposing virtual services as DNS records.
@@ -477,17 +600,7 @@ func buildIstioVirtualServiceSource(ctx context.Context, p ClientGenerator, cfg 
 	if err != nil {
 		return nil, err
 	}
-	return NewIstioVirtualServiceSource(ctx, kubernetesClient, istioClient, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.IgnoreHostnameAnnotation)
-}
-
-// buildCloudFoundrySource creates a CloudFoundry source for exposing CF applications as DNS records.
-// Uses CloudFoundry client instead of Kubernetes client. Simple constructor with minimal parameters.
-func buildCloudFoundrySource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
-	cfClient, err := p.CloudFoundryClient(cfg.CFAPIEndpoint, cfg.CFUsername, cfg.CFPassword)
-	if err != nil {
-		return nil, err
-	}
-	return NewCloudFoundrySource(cfClient)
+	return NewIstioVirtualServiceSource(ctx, kubernetesClient, istioClient, cfg)
 }
 
 func buildAmbassadorHostSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -499,7 +612,7 @@ func buildAmbassadorHostSource(ctx context.Context, p ClientGenerator, cfg *Conf
 	if err != nil {
 		return nil, err
 	}
-	return NewAmbassadorHostSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter, cfg.LabelFilter)
+	return NewAmbassadorHostSource(ctx, dynamicClient, kubernetesClient, cfg)
 }
 
 func buildContourHTTPProxySource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -507,7 +620,7 @@ func buildContourHTTPProxySource(ctx context.Context, p ClientGenerator, cfg *Co
 	if err != nil {
 		return nil, err
 	}
-	return NewContourHTTPProxySource(ctx, dynamicClient, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.IgnoreHostnameAnnotation)
+	return NewContourHTTPProxySource(ctx, dynamicClient, cfg)
 }
 
 // buildGlooProxySource creates a Gloo source for exposing Gloo proxies as DNS records.
@@ -522,7 +635,7 @@ func buildGlooProxySource(ctx context.Context, p ClientGenerator, cfg *Config) (
 	if err != nil {
 		return nil, err
 	}
-	return NewGlooSource(ctx, dynamicClient, kubernetesClient, cfg.GlooNamespaces)
+	return NewGlooSource(ctx, dynamicClient, kubernetesClient, cfg)
 }
 
 func buildTraefikProxySource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -534,7 +647,7 @@ func buildTraefikProxySource(ctx context.Context, p ClientGenerator, cfg *Config
 	if err != nil {
 		return nil, err
 	}
-	return NewTraefikSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter, cfg.IgnoreHostnameAnnotation, cfg.TraefikEnableLegacy, cfg.TraefikDisableNew)
+	return NewTraefikSource(ctx, dynamicClient, kubernetesClient, cfg)
 }
 
 func buildOpenShiftRouteSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -542,38 +655,42 @@ func buildOpenShiftRouteSource(ctx context.Context, p ClientGenerator, cfg *Conf
 	if err != nil {
 		return nil, err
 	}
-	return NewOcpRouteSource(ctx, ocpClient, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.IgnoreHostnameAnnotation, cfg.LabelFilter, cfg.OCPRouterName)
+	return NewOcpRouteSource(ctx, ocpClient, cfg)
 }
 
-// buildCRDSource creates a CRD source for exposing custom resources as DNS records.
-// Uses a specialized CRD client created via NewCRDClientForAPIVersionKind.
-// Parameter order: crdClient, namespace, kind, annotationFilter, labelFilter, scheme, updateEvents
+// buildCRDSource creates a CRD source for exposing DNSEndpoint custom resources as DNS records.
 func buildCRDSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
-	client, err := p.KubeClient()
+	restConfig, err := p.RESTConfig()
 	if err != nil {
 		return nil, err
 	}
-	crdClient, scheme, err := NewCRDClientForAPIVersionKind(client, cfg.KubeConfig, cfg.APIServerURL, cfg.CRDSourceAPIVersion, cfg.CRDSourceKind)
+	src, err := NewCRDSource(ctx, restConfig, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return NewCRDSource(crdClient, cfg.Namespace, cfg.CRDSourceKind, cfg.AnnotationFilter, cfg.LabelFilter, scheme, cfg.UpdateEvents)
+	stashCRDClients(cfg, src)
+	return src, nil
+}
+
+// stashCRDClients records src's client on cfg for reuse if src is a *crdSource,
+// so it can be exercised without needing a working REST config in tests.
+func stashCRDClients(cfg *Config, src Source) {
+	if cs, ok := src.(*crdSource); ok {
+		cfg.crdClients = crd.NewCRDClients(cs.crReader, cs.crWriter)
+	}
 }
 
 // buildSkipperRouteGroupSource creates a Skipper RouteGroup source for exposing route groups as DNS records.
-// Special case: Does not use ClientGenerator pattern, instead manages its own authentication.
-// Retrieves bearer token from REST config for API server authentication.
-func buildSkipperRouteGroupSource(ctx context.Context, cfg *Config) (Source, error) {
-	apiServerURL := cfg.APIServerURL
-	tokenPath := ""
-	token := ""
-	restConfig, err := GetRestConfig(cfg.KubeConfig, cfg.APIServerURL)
-	if err == nil {
-		apiServerURL = restConfig.Host
-		tokenPath = restConfig.BearerTokenFile
-		token = restConfig.BearerToken
+func buildSkipperRouteGroupSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
+	restConfig, err := p.RESTConfig()
+	if err != nil {
+		return nil, err
 	}
-	return NewRouteGroupSource(cfg.RequestTimeout, token, tokenPath, apiServerURL, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.SkipperRouteGroupVersion, cfg.CombineFQDNAndAnnotation, cfg.IgnoreHostnameAnnotation)
+	rgClient, err := rgversioned.NewForConfig(restConfig)
+	if err != nil {
+		return nil, err
+	}
+	return NewRouteGroupSource(ctx, rgClient, cfg)
 }
 
 func buildKongTCPIngressSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -585,7 +702,7 @@ func buildKongTCPIngressSource(ctx context.Context, p ClientGenerator, cfg *Conf
 	if err != nil {
 		return nil, err
 	}
-	return NewKongTCPIngressSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter, cfg.IgnoreHostnameAnnotation)
+	return NewKongTCPIngressSource(ctx, dynamicClient, kubernetesClient, cfg)
 }
 
 func buildF5VirtualServerSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -597,7 +714,7 @@ func buildF5VirtualServerSource(ctx context.Context, p ClientGenerator, cfg *Con
 	if err != nil {
 		return nil, err
 	}
-	return NewF5VirtualServerSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter)
+	return NewF5VirtualServerSource(ctx, dynamicClient, kubernetesClient, cfg)
 }
 
 func buildF5TransportServerSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
@@ -609,139 +726,27 @@ func buildF5TransportServerSource(ctx context.Context, p ClientGenerator, cfg *C
 	if err != nil {
 		return nil, err
 	}
-	return NewF5TransportServerSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter)
+	return NewF5TransportServerSource(ctx, dynamicClient, kubernetesClient, cfg)
 }
 
-// instrumentedRESTConfig creates a REST config with request instrumentation for monitoring.
-// Adds HTTP transport wrapper for Prometheus metrics collection and request timeout configuration.
-//
-// Path Processing: Simplifies URL paths for metrics by taking the last segment,
-// reducing cardinality of metric labels for better performance.
-//
-// Timeout: Applies the specified request timeout to prevent hanging requests.
-func instrumentedRESTConfig(kubeConfig, apiServerURL string, requestTimeout time.Duration) (*rest.Config, error) {
-	config, err := GetRestConfig(kubeConfig, apiServerURL)
+func buildUnstructuredSource(ctx context.Context, p ClientGenerator, cfg *Config) (Source, error) {
+	kubeClient, err := p.KubeClient()
 	if err != nil {
 		return nil, err
 	}
-
-	config.WrapTransport = extdnshttp.NewInstrumentedTransport
-
-	config.Timeout = requestTimeout
-	return config, nil
+	dynamicClient, err := p.DynamicKubernetesClient()
+	if err != nil {
+		return nil, err
+	}
+	return NewUnstructuredFQDNSource(ctx, dynamicClient, kubeClient, cfg)
 }
 
-// GetRestConfig returns the REST client configuration for Kubernetes API access.
-// Supports both in-cluster and external cluster configurations.
-//
-// Configuration Priority:
-// 1. If kubeConfig is empty, tries the recommended home file (~/.kube/config)
-// 2. If kubeConfig is still empty, uses in-cluster service account
-// 3. Otherwise, uses the specified kubeConfig file
-//
-// API Server Override: The apiServerURL parameter can override the server URL
-// from the kubeconfig file, useful for proxy scenarios or custom endpoints.
-func GetRestConfig(kubeConfig, apiServerURL string) (*rest.Config, error) {
-	if kubeConfig == "" {
-		if _, err := os.Stat(clientcmd.RecommendedHomeFile); err == nil {
-			kubeConfig = clientcmd.RecommendedHomeFile
-		}
-	}
-	log.Debugf("apiServerURL: %s", apiServerURL)
-	log.Debugf("kubeConfig: %s", kubeConfig)
-
-	// evaluate whether to use kubeConfig-file or serviceaccount-token
-	var (
-		config *rest.Config
-		err    error
-	)
-	if kubeConfig == "" {
-		log.Infof("Using inCluster-config based on serviceaccount-token")
-		config, err = rest.InClusterConfig()
-	} else {
-		log.Infof("Using kubeConfig")
-		config, err = clientcmd.BuildConfigFromFlags(apiServerURL, kubeConfig)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	return config, nil
-}
-
-// NewKubeClient returns a new Kubernetes client object. It takes a Config and
-// uses APIServerURL and KubeConfig attributes to connect to the cluster. If
-// KubeConfig isn't provided it defaults to using the recommended default.
-func NewKubeClient(kubeConfig, apiServerURL string, requestTimeout time.Duration) (*kubernetes.Clientset, error) {
-	log.Infof("Instantiating new Kubernetes client")
-	config, err := instrumentedRESTConfig(kubeConfig, apiServerURL, requestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	log.Infof("Created Kubernetes client %s", config.Host)
-	return client, nil
-}
-
-// NewIstioClient returns a new Istio client object. It uses the configured
-// KubeConfig attribute to connect to the cluster. If KubeConfig isn't provided
-// it defaults to using the recommended default.
-// NB: Istio controls the creation of the underlying Kubernetes client, so we
-// have no ability to tack on transport wrappers (e.g., Prometheus request
-// wrappers) to the client's config at this level. Furthermore, the Istio client
-// constructor does not expose the ability to override the Kubernetes API server endpoint,
-// so the apiServerURL config attribute has no effect.
-func NewIstioClient(kubeConfig string, apiServerURL string) (*istioclient.Clientset, error) {
-	if kubeConfig == "" {
-		if _, err := os.Stat(clientcmd.RecommendedHomeFile); err == nil {
-			kubeConfig = clientcmd.RecommendedHomeFile
-		}
-	}
-
-	restCfg, err := clientcmd.BuildConfigFromFlags(apiServerURL, kubeConfig)
-	if err != nil {
-		return nil, err
-	}
-
+// NewIstioClient returns a new Istio client object from the given REST config.
+func NewIstioClient(restCfg *rest.Config) (*istioclient.Clientset, error) {
 	ic, err := istioclient.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create istio client: %w", err)
 	}
 
 	return ic, nil
-}
-
-// NewDynamicKubernetesClient returns a new Dynamic Kubernetes client object. It takes a Config and
-// uses APIServerURL and KubeConfig attributes to connect to the cluster. If
-// KubeConfig isn't provided it defaults to using the recommended default.
-func NewDynamicKubernetesClient(kubeConfig, apiServerURL string, requestTimeout time.Duration) (dynamic.Interface, error) {
-	config, err := instrumentedRESTConfig(kubeConfig, apiServerURL, requestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	client, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	log.Infof("Created Dynamic Kubernetes client %s", config.Host)
-	return client, nil
-}
-
-// NewOpenShiftClient returns a new Openshift client object. It takes a Config and
-// uses APIServerURL and KubeConfig attributes to connect to the cluster. If
-// KubeConfig isn't provided it defaults to using the recommended default.
-func NewOpenShiftClient(kubeConfig, apiServerURL string, requestTimeout time.Duration) (*openshift.Clientset, error) {
-	config, err := instrumentedRESTConfig(kubeConfig, apiServerURL, requestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	client, err := openshift.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	log.Infof("Created OpenShift client %s", config.Host)
-	return client, nil
 }

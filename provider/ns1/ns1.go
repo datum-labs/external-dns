@@ -28,6 +28,8 @@ import (
 	api "gopkg.in/ns1/ns1-go.v2/rest"
 	"gopkg.in/ns1/ns1-go.v2/rest/model/dns"
 
+	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
+
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
@@ -103,8 +105,22 @@ type NS1Provider struct {
 	minTTLSeconds int
 }
 
-// NewNS1Provider creates a new NS1 Provider
-func NewNS1Provider(config NS1Config) (*NS1Provider, error) {
+// New creates an NS1 provider from the given configuration.
+func New(_ context.Context, cfg *externaldns.Config, domainFilter *endpoint.DomainFilter) (provider.Provider, error) {
+	return newProvider(
+		NS1Config{
+			DomainFilter:  domainFilter,
+			ZoneIDFilter:  provider.NewZoneIDFilter(cfg.ZoneIDFilter),
+			NS1Endpoint:   cfg.NS1Endpoint,
+			NS1IgnoreSSL:  cfg.NS1IgnoreSSL,
+			DryRun:        cfg.DryRun,
+			MinTTLSeconds: cfg.NS1MinTTLSeconds,
+		},
+	)
+}
+
+// newProvider creates a new NS1 Provider
+func newProvider(config NS1Config) (*NS1Provider, error) {
 	return newNS1ProviderWithHTTPClient(config, http.DefaultClient)
 }
 
@@ -140,12 +156,13 @@ func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Pr
 		client:        NS1DomainService{apiClient},
 		domainFilter:  config.DomainFilter,
 		zoneIDFilter:  config.ZoneIDFilter,
+		dryRun:        config.DryRun,
 		minTTLSeconds: config.MinTTLSeconds,
 	}, nil
 }
 
 // Records returns the endpoints this provider knows about
-func (p *NS1Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
+func (p *NS1Provider) Records(_ context.Context) ([]*endpoint.Endpoint, error) {
 	zones, err := p.zonesFiltered()
 	if err != nil {
 		return nil, err
@@ -183,10 +200,7 @@ func (p *NS1Provider) ns1BuildRecord(zoneName string, change *ns1Change) *dns.Re
 		record.AddAnswer(dns.NewAnswer(strings.Split(v, " ")))
 	}
 	// set default ttl, but respect minTTLSeconds
-	ttl := defaultTTL
-	if p.minTTLSeconds > ttl {
-		ttl = p.minTTLSeconds
-	}
+	ttl := max(p.minTTLSeconds, defaultTTL)
 	if change.Endpoint.RecordTTL.IsConfigured() {
 		ttl = int(change.Endpoint.RecordTTL)
 	}
@@ -277,7 +291,7 @@ type ns1Change struct {
 }
 
 // ApplyChanges applies a given set of changes in a given zone.
-func (p *NS1Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
+func (p *NS1Provider) ApplyChanges(_ context.Context, changes *plan.Changes) error {
 	combinedChanges := make([]*ns1Change, 0, len(changes.Create)+len(changes.UpdateNew)+len(changes.Delete))
 
 	combinedChanges = append(combinedChanges, newNS1Changes(ns1Create, changes.Create)...)

@@ -26,7 +26,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"sigs.k8s.io/external-dns/internal/sets"
 	"sigs.k8s.io/external-dns/source/annotations"
+	templatetest "sigs.k8s.io/external-dns/source/template/testutil"
 )
 
 type podSpec struct {
@@ -44,27 +47,25 @@ func fixtureCreatePodsWithNodes(input []podSpec) []*corev1.Pod {
 
 	var createPod = func(index int, spec podSpec) *corev1.Pod {
 		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("pod-%d-%s", index, uuid.NewString()),
-				Namespace: spec.namespace,
-				Labels: func() map[string]string {
-					if spec.totalTarget > index {
-						return spec.labels
-					}
-					return map[string]string{
-						"app":   fmt.Sprintf("my-app-%d", rand.IntN(10)),
-						"index": strconv.Itoa(index),
-					}
-				}(),
-				Annotations: func() map[string]string {
-					if spec.totalTarget > index {
-						return spec.annotations
-					}
-					return map[string]string{
-						"key1": fmt.Sprintf("value-%d", rand.IntN(10)),
-					}
-				}(),
-			},
+			Name:      fmt.Sprintf("pod-%d-%s", index, uuid.NewString()),
+			Namespace: spec.namespace,
+			Labels: func() map[string]string {
+				if spec.totalTarget > index {
+					return spec.labels
+				}
+				return map[string]string{
+					"app":   fmt.Sprintf("my-app-%d", rand.IntN(10)),
+					"index": strconv.Itoa(index),
+				}
+			}(),
+			Annotations: func() map[string]string {
+				if spec.totalTarget > index {
+					return spec.annotations
+				}
+				return map[string]string{
+					"key1": fmt.Sprintf("value-%d", rand.IntN(10)),
+				}
+			}(),
 			Spec: corev1.PodSpec{},
 			Status: corev1.PodStatus{
 				Phase: corev1.PodRunning,
@@ -77,12 +78,12 @@ func fixtureCreatePodsWithNodes(input []podSpec) []*corev1.Pod {
 
 	for _, el := range input {
 		totalPods := el.totalTarget + el.totalRandom
-		for i := 0; i < totalPods; i++ {
+		for i := range totalPods {
 			pods = append(pods, createPod(i, el))
 		}
 	}
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rand.Shuffle(len(pods), func(i, j int) {
 			pods[i], pods[j] = pods[j], pods[i]
 		})
@@ -130,22 +131,20 @@ func TestPodsWithAnnotationsAndLabels(t *testing.T) {
 
 	client := fake.NewClientset()
 
-	nodes := map[string]bool{}
+	nodes := sets.New[string]()
 
 	for _, pod := range pods {
-		if _, exists := nodes[pod.Spec.NodeName]; !exists {
-			nodes[pod.Spec.NodeName] = true
+		if !nodes.Has(pod.Spec.NodeName) {
+			nodes.Insert(pod.Spec.NodeName)
 			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: pod.Spec.NodeName,
-				},
+				Name: pod.Spec.NodeName,
 			}
 			if _, err := client.CoreV1().Nodes().Create(t.Context(), node, metav1.CreateOptions{}); err != nil {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		}
 		if _, err := client.CoreV1().Pods(pod.Namespace).Create(t.Context(), pod, metav1.CreateOptions{}); err != nil {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		}
 	}
 
@@ -217,10 +216,12 @@ func TestPodsWithAnnotationsAndLabels(t *testing.T) {
 			selector, _ := annotations.ParseFilter(tt.labelSelector)
 			pSource, err := NewPodSource(
 				t.Context(), client,
-				tt.namespace, "",
-				false, "",
-				"{{ .Name }}.tld.org", false,
-				tt.annotationFilter, selector)
+				&Config{
+					Namespaces:       []string{tt.namespace},
+					TemplateEngine:   templatetest.MustEngine(t, "{{ .Name }}.tld.org", "", "", false),
+					AnnotationFilter: parseAnnotationFilterOrNil(tt.annotationFilter),
+					LabelFilter:      selector,
+				})
 			require.NoError(t, err)
 
 			endpoints, err := pSource.Endpoints(t.Context())

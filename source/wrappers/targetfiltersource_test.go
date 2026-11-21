@@ -19,9 +19,10 @@ package wrappers
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 
+	"sigs.k8s.io/external-dns/internal/sets"
 	"sigs.k8s.io/external-dns/internal/testutils"
 	"sigs.k8s.io/external-dns/source"
 
@@ -29,19 +30,15 @@ import (
 )
 
 type mockTargetNetFilter struct {
-	targets map[string]bool
+	targets sets.Set[string]
 }
 
 func NewMockTargetNetFilter(targets []string) endpoint.TargetFilterInterface {
-	targetMap := make(map[string]bool)
-	for _, target := range targets {
-		targetMap[target] = true
-	}
-	return &mockTargetNetFilter{targets: targetMap}
+	return &mockTargetNetFilter{targets: sets.New(targets...)}
 }
 
 func (m *mockTargetNetFilter) Match(target string) bool {
-	return m.targets[target]
+	return m.targets.Has(target)
 }
 
 func (m *mockTargetNetFilter) IsEnabled() bool {
@@ -58,7 +55,7 @@ func TestEchoSourceReturnGivenSources(t *testing.T) {
 	}}
 	e := testutils.NewMockSource(startEndpoints...)
 
-	endpoints, err := e.Endpoints(context.Background())
+	endpoints, err := e.Endpoints(t.Context())
 	if err != nil {
 		t.Errorf("Expected no error but got %s", err.Error())
 	}
@@ -78,7 +75,7 @@ func TestTargetFilterSource(t *testing.T) {
 }
 
 // TestTargetFilterSourceImplementsSource tests that targetFilterSource is a valid Source.
-func TestTargetFilterSourceImplementsSource(t *testing.T) {
+func TestTargetFilterSourceImplementsSource(_ *testing.T) {
 	var _ source.Source = &targetFilterSource{}
 }
 
@@ -127,11 +124,21 @@ func TestTargetFilterSourceEndpoints(t *testing.T) {
 			echo := testutils.NewMockSource(tt.endpoints...)
 			src := NewTargetFilterSource(echo, tt.filters)
 
-			endpoints, err := src.Endpoints(context.Background())
+			endpoints, err := src.Endpoints(t.Context())
 			require.NoError(t, err, "failed to get Endpoints")
-			validateEndpoints(t, endpoints, tt.expected)
+			testutils.ValidateEndpoints(t, endpoints, tt.expected)
 		})
 	}
+
+	t.Run("wrapped source error is propagated", func(t *testing.T) {
+		t.Parallel()
+		m := testutils.NewMockSource()
+		m.On("Endpoints").Unset()
+		m.On("Endpoints").Return([]*endpoint.Endpoint(nil), assert.AnError)
+		src := NewTargetFilterSource(m, NewMockTargetNetFilter([]string{}))
+		_, err := src.Endpoints(t.Context())
+		require.ErrorIs(t, err, assert.AnError)
+	})
 }
 
 func TestTargetFilterConcreteTargetFilter(t *testing.T) {
@@ -209,10 +216,111 @@ func TestTargetFilterConcreteTargetFilter(t *testing.T) {
 			echo := testutils.NewMockSource(tt.endpoints...)
 			src := NewTargetFilterSource(echo, tt.filters)
 
-			endpoints, err := src.Endpoints(context.Background())
+			endpoints, err := src.Endpoints(t.Context())
 			require.NoError(t, err, "failed to get Endpoints")
 
-			validateEndpoints(t, endpoints, tt.expected)
+			testutils.ValidateEndpoints(t, endpoints, tt.expected)
+		})
+	}
+}
+
+func TestTargetFilterNonAddressRecords(t *testing.T) {
+	tests := []struct {
+		title     string
+		filters   endpoint.TargetFilterInterface
+		endpoints []*endpoint.Endpoint
+		expected  []*endpoint.Endpoint
+	}{
+		{
+			title:   "should pass CNAME records",
+			filters: endpoint.NewTargetNetFilterWithExclusions([]string{"10.0.0.0/8", "91ca::/16"}, []string{}),
+			endpoints: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.1.2.3"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "192.168.7.1"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeAAAA, "91ca:beef:83b2:beef:1490:7604:d192:b326"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeAAAA, "2ac3:beef:83b2:beef:1490:beef:d192:beef"),
+				endpoint.NewEndpoint("foo-cname", endpoint.RecordTypeCNAME, "target-rr.example.com"),
+			},
+			expected: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.1.2.3"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeAAAA, "91ca:beef:83b2:beef:1490:7604:d192:b326"),
+				endpoint.NewEndpoint("foo-cname", endpoint.RecordTypeCNAME, "target-rr.example.com"),
+			},
+		},
+		{
+			title:   "should pass non-IP records and exclude IP records with targets in 172.16.0.0/12",
+			filters: endpoint.NewTargetNetFilterWithExclusions([]string{}, []string{"172.16.0.0/12"}),
+			endpoints: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.1.2.3"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "192.168.7.1"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "172.20.1.66"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "172.23.8.134"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeAAAA, "91ca:beef:83b2:beef:1490:7604:d192:b326"),
+				endpoint.NewEndpoint("foo-cname", endpoint.RecordTypeCNAME, "target-rr.example.com"),
+				endpoint.NewEndpoint("foo-txt", endpoint.RecordTypeTXT, "random text data"),
+				endpoint.NewEndpoint("_foo._tcp", endpoint.RecordTypeSRV, "10 80 443 target-1.example.com."),
+				endpoint.NewEndpoint("_foo._tcp", endpoint.RecordTypeSRV, "10 20 443 target-2.example.com."),
+			},
+			expected: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.1.2.3"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "192.168.7.1"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeAAAA, "91ca:beef:83b2:beef:1490:7604:d192:b326"),
+				endpoint.NewEndpoint("foo-cname", endpoint.RecordTypeCNAME, "target-rr.example.com"),
+				endpoint.NewEndpoint("foo-txt", endpoint.RecordTypeTXT, "random text data"),
+				endpoint.NewEndpoint("_foo._tcp", endpoint.RecordTypeSRV, "10 80 443 target-1.example.com."),
+				endpoint.NewEndpoint("_foo._tcp", endpoint.RecordTypeSRV, "10 20 443 target-2.example.com."),
+			},
+		},
+		{
+			title:   "should pass non-IP records and 10.16.0.0/16 except 10.16.2.0/23",
+			filters: endpoint.NewTargetNetFilterWithExclusions([]string{"10.16.0.0/16"}, []string{"10.16.2.0/23"}),
+			endpoints: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.1.2.3"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.16.70.1", "10.16.70.2", "10.16.3.123"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.16.33.33"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.16.2.123"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeAAAA, "91ca:beef:83b2:beef:1490:7604:d192:b326"),
+				endpoint.NewEndpoint("foo-txt", endpoint.RecordTypeTXT, "random text data"),
+				endpoint.NewEndpoint("_foo._tcp", endpoint.RecordTypeSRV, "10 80 443 target-1.example.com."),
+			},
+			expected: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.16.70.1", "10.16.70.2"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.16.33.33"),
+				endpoint.NewEndpoint("foo-txt", endpoint.RecordTypeTXT, "random text data"),
+				endpoint.NewEndpoint("_foo._tcp", endpoint.RecordTypeSRV, "10 80 443 target-1.example.com."),
+			},
+		},
+		{
+			// LoadBalancer status with IP + hostname; CNAME no longer dropped (RFC 1034 conflict).
+			title:   "should pass CNAME alongside A at the same name with include filter",
+			filters: endpoint.NewTargetNetFilterWithExclusions([]string{"10.0.0.0/8"}, []string{}),
+			endpoints: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.0.0.5"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeCNAME, "lb.example.net"),
+			},
+			expected: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "10.0.0.5"),
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeCNAME, "lb.example.net"),
+			},
+		},
+		{
+			title:   "should drop A record with non-IP target with include filter",
+			filters: endpoint.NewTargetNetFilterWithExclusions([]string{"10.0.0.0/8"}, []string{}),
+			endpoints: []*endpoint.Endpoint{
+				endpoint.NewEndpoint("foo", endpoint.RecordTypeA, "lb.example.net"),
+			},
+			expected: []*endpoint.Endpoint{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.title, func(t *testing.T) {
+			echo := testutils.NewMockSource(tt.endpoints...)
+			src := NewTargetFilterSource(echo, tt.filters)
+
+			endpoints, err := src.Endpoints(t.Context())
+			require.NoError(t, err, "failed to get Endpoints")
+
+			testutils.ValidateEndpoints(t, endpoints, tt.expected)
 		})
 	}
 }

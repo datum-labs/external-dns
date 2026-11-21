@@ -18,15 +18,24 @@ package metrics
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"sigs.k8s.io/external-dns/internal/sets"
+)
+
+const (
+	metricTypeGauge   = "gauge"
+	metricTypeCounter = "counter"
 )
 
 type MetricRegistry struct {
 	Registerer prometheus.Registerer
 	Metrics    []*Metric
-	mName      map[string]bool
+	mName      sets.Set[string]
 }
 
 type Metric struct {
@@ -36,6 +45,7 @@ type Metric struct {
 	Name      string
 	Help      string
 	FQDN      string
+	Labels    []string
 }
 
 type IMetric interface {
@@ -81,24 +91,36 @@ func (g GaugeVecMetric) Get() *Metric {
 // SetWithLabels sets the value of the Gauge metric for the specified label values.
 // All label values are converted to lowercase before being applied.
 func (g GaugeVecMetric) SetWithLabels(value float64, lvs ...string) {
-	for i, v := range lvs {
-		lvs[i] = strings.ToLower(v)
-	}
-	g.Gauge.WithLabelValues(lvs...).Set(value)
+	g.Gauge.WithLabelValues(toLower(lvs)...).Set(value)
+}
+
+// AddWithLabels adds the value to the Gauge metric for the specified label values.
+// All label values are converted to lowercase before being applied.
+//
+// Without Reset(), values accumulate and reset only on process restart.
+// Use Reset() + AddWithLabels() pattern for per-cycle counts.
+func (g GaugeVecMetric) AddWithLabels(value float64, lvs ...string) {
+	g.Gauge.WithLabelValues(toLower(lvs)...).Add(value)
+}
+
+// Reset removes all label combinations from the gauge vector.
+// Use Reset() at the start of each collection cycle followed by
+// AddWithLabels() to prevent stale label combinations from persisting.
+func (g GaugeVecMetric) Reset() {
+	g.Gauge.Reset()
 }
 
 func NewGaugeWithOpts(opts prometheus.GaugeOpts) GaugeMetric {
 	opts.Namespace = Namespace
 	return GaugeMetric{
-		Metric: Metric{
-			Type:      "gauge",
-			Name:      opts.Name,
-			FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Help:      opts.Help,
-		},
-		Gauge: prometheus.NewGauge(opts),
+		Type:      metricTypeGauge,
+		Name:      opts.Name,
+		FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
+		Namespace: opts.Namespace,
+		Subsystem: opts.Subsystem,
+		Help:      opts.Help,
+		Labels:    slices.Sorted(maps.Keys(opts.ConstLabels)),
+		Gauge:     prometheus.NewGauge(opts),
 	}
 }
 
@@ -107,44 +129,41 @@ func NewGaugeWithOpts(opts prometheus.GaugeOpts) GaugeMetric {
 func NewGaugedVectorOpts(opts prometheus.GaugeOpts, labelNames []string) GaugeVecMetric {
 	opts.Namespace = Namespace
 	return GaugeVecMetric{
-		Metric: Metric{
-			Type:      "gauge",
-			Name:      opts.Name,
-			FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Help:      opts.Help,
-		},
-		Gauge: *prometheus.NewGaugeVec(opts, labelNames),
+		Type:      metricTypeGauge,
+		Name:      opts.Name,
+		FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
+		Namespace: opts.Namespace,
+		Subsystem: opts.Subsystem,
+		Help:      opts.Help,
+		Labels:    append(slices.Sorted(maps.Keys(opts.ConstLabels)), labelNames...),
+		Gauge:     *prometheus.NewGaugeVec(opts, labelNames),
 	}
 }
 
 func NewCounterWithOpts(opts prometheus.CounterOpts) CounterMetric {
 	opts.Namespace = Namespace
 	return CounterMetric{
-		Metric: Metric{
-			Type:      "counter",
-			Name:      opts.Name,
-			FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Help:      opts.Help,
-		},
-		Counter: prometheus.NewCounter(opts),
+		Type:      metricTypeCounter,
+		Name:      opts.Name,
+		FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
+		Namespace: opts.Namespace,
+		Subsystem: opts.Subsystem,
+		Help:      opts.Help,
+		Labels:    slices.Sorted(maps.Keys(opts.ConstLabels)),
+		Counter:   prometheus.NewCounter(opts),
 	}
 }
 
 func NewCounterVecWithOpts(opts prometheus.CounterOpts, labelNames []string) CounterVecMetric {
 	opts.Namespace = Namespace
 	return CounterVecMetric{
-		Metric: Metric{
-			Type:      "counter",
-			Name:      opts.Name,
-			FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Help:      opts.Help,
-		},
+		Type:       metricTypeCounter,
+		Name:       opts.Name,
+		FQDN:       fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
+		Namespace:  opts.Namespace,
+		Subsystem:  opts.Subsystem,
+		Help:       opts.Help,
+		Labels:     append(slices.Sorted(maps.Keys(opts.ConstLabels)), labelNames...),
 		CounterVec: prometheus.NewCounterVec(opts, labelNames),
 	}
 }
@@ -160,19 +179,18 @@ func (g GaugeFuncMetric) Get() *Metric {
 
 func NewGaugeFuncMetric(opts prometheus.GaugeOpts) GaugeFuncMetric {
 	return GaugeFuncMetric{
-		Metric: Metric{
-			Type: "gauge",
-			Name: opts.Name,
-			FQDN: func() string {
-				if opts.Subsystem != "" {
-					return fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name)
-				}
-				return opts.Name
-			}(),
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Help:      opts.Help,
-		},
+		Type: metricTypeGauge,
+		Name: opts.Name,
+		FQDN: func() string {
+			if opts.Subsystem != "" {
+				return fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name)
+			}
+			return opts.Name
+		}(),
+		Namespace: opts.Namespace,
+		Subsystem: opts.Subsystem,
+		Help:      opts.Help,
+		Labels:    slices.Sorted(maps.Keys(opts.ConstLabels)),
 		GaugeFunc: prometheus.NewGaugeFunc(opts, func() float64 { return 1 }),
 	}
 }
@@ -193,14 +211,13 @@ func (s SummaryVecMetric) SetWithLabels(value float64, labels prometheus.Labels)
 func NewSummaryVecWithOpts(opts prometheus.SummaryOpts, labels []string) SummaryVecMetric {
 	opts.Namespace = Namespace
 	return SummaryVecMetric{
-		Metric: Metric{
-			Type:      "summaryVec",
-			Name:      opts.Name,
-			FQDN:      fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
-			Namespace: opts.Namespace,
-			Subsystem: opts.Subsystem,
-			Help:      opts.Help,
-		},
+		Type:       "summaryVec",
+		Name:       opts.Name,
+		FQDN:       fmt.Sprintf("%s_%s", opts.Subsystem, opts.Name),
+		Namespace:  opts.Namespace,
+		Subsystem:  opts.Subsystem,
+		Help:       opts.Help,
+		Labels:     append(slices.Sorted(maps.Keys(opts.ConstLabels)), labels...),
 		SummaryVec: *prometheus.NewSummaryVec(opts, labels),
 	}
 }
@@ -208,4 +225,14 @@ func NewSummaryVecWithOpts(opts prometheus.SummaryOpts, labels []string) Summary
 func PathProcessor(path string) string {
 	parts := strings.Split(path, "/")
 	return parts[len(parts)-1]
+}
+
+// toLower converts all label values to lowercase.
+// The Prometheus maintainers have intentionally avoided magic transformations to keep label handling explicit and predictable.
+// We expect consistent casing, normalizing at ingestion is the standard practice.
+func toLower(lvs []string) []string {
+	for i := range lvs {
+		lvs[i] = strings.ToLower(lvs[i])
+	}
+	return lvs
 }

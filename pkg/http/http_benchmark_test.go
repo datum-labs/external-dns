@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type roundTripFunc func(req *http.Request) *http.Response
@@ -55,7 +54,7 @@ func (api *apiUnderTest) doStuff() ([]byte, error) {
 }
 
 func BenchmarkRoundTripper(b *testing.B) {
-	client := newTestClient(func(req *http.Request) *http.Response {
+	client := newTestClient(func(_ *http.Request) *http.Response {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(bytes.NewBufferString(`OK`)),
@@ -66,13 +65,15 @@ func BenchmarkRoundTripper(b *testing.B) {
 	for b.Loop() {
 		api := apiUnderTest{client, "http://example.com"}
 		body, err := api.doStuff()
-		require.NoError(b, err)
+		if err != nil {
+			b.Fatal(err)
+		}
 		assert.Equal(b, []byte("OK"), body)
 	}
 }
 
 func TestRoundTripper_Concurrent(t *testing.T) {
-	client := newTestClient(func(req *http.Request) *http.Response {
+	client := newTestClient(func(_ *http.Request) *http.Response {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(bytes.NewBufferString(`OK`)),
@@ -85,7 +86,7 @@ func TestRoundTripper_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			defer wg.Done()
 			body, err := api.doStuff()

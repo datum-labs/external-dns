@@ -55,9 +55,13 @@ func (ms *multiSource) Endpoints(ctx context.Context) ([]*endpoint.Endpoint, err
 			hasSourceTargets := len(ep.Targets) > 0
 
 			if ms.forceDefaultTargets || !hasSourceTargets {
-				eps := source.EndpointsForHostname(ep.DNSName, ms.defaultTargets, ep.RecordTTL, ep.ProviderSpecific, ep.SetIdentifier, "")
+				eps := endpoint.EndpointsForHostname(ep.DNSName, ms.defaultTargets, ep.RecordTTL, ep.ProviderSpecific, ep.SetIdentifier, "")
 				for _, e := range eps {
 					e.Labels = ep.Labels
+					// Without the refs, events and the DNSEndpoint status can't tell which object these records came from.
+					for _, ref := range ep.RefObjects() {
+						e.WithRefObject(ref)
+					}
 				}
 				result = append(result, eps...)
 				continue

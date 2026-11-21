@@ -27,8 +27,23 @@ import (
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
+	"sigs.k8s.io/external-dns/pkg/version"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
+)
+
+const (
+	logFieldType       = "Type"
+	logFieldName       = "Name"
+	logFieldValue      = "Value"
+	logFieldPriority   = "Priority"
+	logFieldTTL        = "TTL"
+	logFieldAction     = "action"
+	logFieldZoneID     = "zoneID"
+	logFieldZoneName   = "zoneName"
+	logFieldDNSName    = "dnsName"
+	logFieldRecordType = "recordType"
+	logFieldTarget     = "target"
 )
 
 // CivoProvider is an implementation of Provider for Civo's DNS.
@@ -70,8 +85,13 @@ type CivoChangeDelete struct {
 	DomainRecord civogo.DNSRecord
 }
 
-// NewCivoProvider initializes a new Civo DNS based Provider.
-func NewCivoProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*CivoProvider, error) {
+// New creates a Civo provider from the given configuration.
+func New(_ context.Context, cfg *externaldns.Config, domainFilter *endpoint.DomainFilter) (provider.Provider, error) {
+	return newProvider(domainFilter, cfg.DryRun)
+}
+
+// newProvider initializes a new Civo DNS based Provider.
+func newProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*CivoProvider, error) {
 	token, ok := os.LookupEnv("CIVO_TOKEN")
 	if !ok {
 		return nil, fmt.Errorf("no token found")
@@ -87,8 +107,8 @@ func NewCivoProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*CivoPro
 	}
 
 	userAgent := &civogo.Component{
-		Name:    externaldns.UserAgentProduct,
-		Version: externaldns.Version,
+		Name:    version.UserAgentProduct,
+		Version: version.Version,
 	}
 	civoClient.SetUserAgent(userAgent)
 
@@ -101,8 +121,8 @@ func NewCivoProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*CivoPro
 }
 
 // Zones returns the list of hosted zones.
-func (p *CivoProvider) Zones(ctx context.Context) ([]civogo.DNSDomain, error) {
-	zones, err := p.fetchZones(ctx)
+func (p *CivoProvider) Zones(_ context.Context) ([]civogo.DNSDomain, error) {
+	zones, err := p.fetchZones()
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +140,7 @@ func (p *CivoProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 	var endpoints []*endpoint.Endpoint
 
 	for _, zone := range zones {
-		records, err := p.fetchRecords(ctx, zone.ID)
+		records, err := p.fetchRecords(zone.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -144,7 +164,7 @@ func (p *CivoProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 	return endpoints, nil
 }
 
-func (p *CivoProvider) fetchRecords(ctx context.Context, domainID string) ([]civogo.DNSRecord, error) {
+func (p *CivoProvider) fetchRecords(domainID string) ([]civogo.DNSRecord, error) {
 	records, err := p.Client.ListDNSRecords(domainID)
 	if err != nil {
 		return nil, err
@@ -153,7 +173,7 @@ func (p *CivoProvider) fetchRecords(ctx context.Context, domainID string) ([]civ
 	return records, nil
 }
 
-func (p *CivoProvider) fetchZones(ctx context.Context) ([]civogo.DNSDomain, error) {
+func (p *CivoProvider) fetchZones() ([]civogo.DNSDomain, error) {
 	var zones []civogo.DNSDomain
 
 	allZones, err := p.Client.ListDNSDomains()
@@ -173,7 +193,7 @@ func (p *CivoProvider) fetchZones(ctx context.Context) ([]civogo.DNSDomain, erro
 }
 
 // submitChanges takes a zone and a collection of Changes and sends them as a single transaction.
-func (p *CivoProvider) submitChanges(ctx context.Context, changes CivoChanges) error {
+func (p *CivoProvider) submitChanges(changes CivoChanges) error {
 	if changes.Empty() {
 		log.Info("All records are already up to date")
 		return nil
@@ -181,12 +201,12 @@ func (p *CivoProvider) submitChanges(ctx context.Context, changes CivoChanges) e
 
 	for _, change := range changes.Creates {
 		logFields := log.Fields{
-			"Type":     change.Options.Type,
-			"Name":     change.Options.Name,
-			"Value":    change.Options.Value,
-			"Priority": change.Options.Priority,
-			"TTL":      change.Options.TTL,
-			"action":   "Create",
+			logFieldType:     change.Options.Type,
+			logFieldName:     change.Options.Name,
+			logFieldValue:    change.Options.Value,
+			logFieldPriority: change.Options.Priority,
+			logFieldTTL:      change.Options.TTL,
+			logFieldAction:   "Create",
 		}
 
 		log.WithFields(logFields).Info("Creating record.")
@@ -203,12 +223,12 @@ func (p *CivoProvider) submitChanges(ctx context.Context, changes CivoChanges) e
 
 	for _, change := range changes.Deletes {
 		logFields := log.Fields{
-			"Type":     change.DomainRecord.Type,
-			"Name":     change.DomainRecord.Name,
-			"Value":    change.DomainRecord.Value,
-			"Priority": change.DomainRecord.Priority,
-			"TTL":      change.DomainRecord.TTL,
-			"action":   "Delete",
+			logFieldType:     change.DomainRecord.Type,
+			logFieldName:     change.DomainRecord.Name,
+			logFieldValue:    change.DomainRecord.Value,
+			logFieldPriority: change.DomainRecord.Priority,
+			logFieldTTL:      change.DomainRecord.TTL,
+			logFieldAction:   "Delete",
 		}
 
 		log.WithFields(logFields).Info("Deleting record.")
@@ -225,12 +245,12 @@ func (p *CivoProvider) submitChanges(ctx context.Context, changes CivoChanges) e
 
 	for _, change := range changes.Updates {
 		logFields := log.Fields{
-			"Type":     change.DomainRecord.Type,
-			"Name":     change.DomainRecord.Name,
-			"Value":    change.DomainRecord.Value,
-			"Priority": change.DomainRecord.Priority,
-			"TTL":      change.DomainRecord.TTL,
-			"action":   "Update",
+			logFieldType:     change.DomainRecord.Type,
+			logFieldName:     change.DomainRecord.Name,
+			logFieldValue:    change.DomainRecord.Value,
+			logFieldPriority: change.DomainRecord.Priority,
+			logFieldTTL:      change.DomainRecord.TTL,
+			logFieldAction:   "Update",
 		}
 
 		log.WithFields(logFields).Info("Updating record.")
@@ -255,8 +275,8 @@ func processCreateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 
 		if len(creates) == 0 {
 			log.WithFields(log.Fields{
-				"zoneID":   zoneID,
-				"zoneName": zone.Name,
+				logFieldZoneID:   zoneID,
+				logFieldZoneName: zone.Name,
 			}).Info("Skipping Zone, no creates found.")
 			continue
 		}
@@ -269,10 +289,10 @@ func processCreateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 
 			if len(matchedRecords) != 0 {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"zoneName":   zone.Name,
-					"dnsName":    ep.DNSName,
-					"recordType": ep.RecordType,
+					logFieldZoneID:     zoneID,
+					logFieldZoneName:   zone.Name,
+					logFieldDNSName:    ep.DNSName,
+					logFieldRecordType: ep.RecordType,
 				}).Warn("Records found which should not exist")
 			}
 
@@ -306,8 +326,8 @@ func processUpdateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 
 		if len(updates) == 0 {
 			log.WithFields(log.Fields{
-				"zoneID":   zoneID,
-				"zoneName": zone.Name,
+				logFieldZoneID:   zoneID,
+				logFieldZoneName: zone.Name,
 			}).Debug("Skipping Zone, no updates found.")
 			continue
 		}
@@ -318,10 +338,10 @@ func processUpdateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 			matchedRecords := getRecordID(records, zone, *ep)
 			if len(matchedRecords) == 0 {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"dnsName":    ep.DNSName,
-					"zoneName":   zone.Name,
-					"recordType": ep.RecordType,
+					logFieldZoneID:     zoneID,
+					logFieldDNSName:    ep.DNSName,
+					logFieldZoneName:   zone.Name,
+					logFieldRecordType: ep.RecordType,
 				}).Warn("Update Records not found.")
 			}
 
@@ -338,11 +358,11 @@ func processUpdateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 			for _, target := range ep.Targets {
 				if record, ok := matchedRecordsByTarget[target]; ok {
 					log.WithFields(log.Fields{
-						"zoneID":     zoneID,
-						"dnsName":    ep.DNSName,
-						"zoneName":   zone.Name,
-						"recordType": ep.RecordType,
-						"target":     target,
+						logFieldZoneID:     zoneID,
+						logFieldDNSName:    ep.DNSName,
+						logFieldZoneName:   zone.Name,
+						logFieldRecordType: ep.RecordType,
+						logFieldTarget:     target,
 					}).Warn("Updating Existing Target")
 
 					civoChange.Updates = append(civoChange.Updates, &CivoChangeUpdate{
@@ -361,11 +381,11 @@ func processUpdateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 				} else {
 					// Record did not previously exist, create new 'target'
 					log.WithFields(log.Fields{
-						"zoneID":     zoneID,
-						"dnsName":    ep.DNSName,
-						"zoneName":   zone.Name,
-						"recordType": ep.RecordType,
-						"target":     target,
+						logFieldZoneID:     zoneID,
+						logFieldDNSName:    ep.DNSName,
+						logFieldZoneName:   zone.Name,
+						logFieldRecordType: ep.RecordType,
+						logFieldTarget:     target,
 					}).Warn("Creating New Target")
 
 					civoChange.Creates = append(civoChange.Creates, &CivoChangeCreate{
@@ -384,10 +404,10 @@ func processUpdateActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 			// Any remaining records have been removed, delete them
 			for _, record := range matchedRecordsByTarget {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"dnsName":    ep.DNSName,
-					"recordType": ep.RecordType,
-					"target":     record.Value,
+					logFieldZoneID:     zoneID,
+					logFieldDNSName:    ep.DNSName,
+					logFieldRecordType: ep.RecordType,
+					logFieldTarget:     record.Value,
 				}).Warn("Deleting target")
 
 				civoChange.Deletes = append(civoChange.Deletes, &CivoChangeDelete{
@@ -408,8 +428,8 @@ func processDeleteActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 
 		if len(deletes) == 0 {
 			log.WithFields(log.Fields{
-				"zoneID":   zoneID,
-				"zoneName": zone.Name,
+				logFieldZoneID:   zoneID,
+				logFieldZoneName: zone.Name,
 			}).Debug("Skipping Zone, no deletes found.")
 			continue
 		}
@@ -421,10 +441,10 @@ func processDeleteActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 
 			if len(matchedRecords) == 0 {
 				log.WithFields(log.Fields{
-					"zoneID":     zoneID,
-					"dnsName":    ep.DNSName,
-					"zoneName":   zone.Name,
-					"recordType": ep.RecordType,
+					logFieldZoneID:     zoneID,
+					logFieldDNSName:    ep.DNSName,
+					logFieldZoneName:   zone.Name,
+					logFieldRecordType: ep.RecordType,
 				}).Warn("Records to Delete not found.")
 			}
 
@@ -440,11 +460,11 @@ func processDeleteActions(zonesByID map[string]civogo.DNSDomain, recordsByZoneID
 }
 
 // ApplyChanges applies a given set of changes in a given zone.
-func (p *CivoProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
+func (p *CivoProvider) ApplyChanges(_ context.Context, changes *plan.Changes) error {
 	var civoChange CivoChanges
 	recordsByZoneID := make(map[string][]civogo.DNSRecord)
 
-	zones, err := p.fetchZones(ctx)
+	zones, err := p.fetchZones()
 
 	if err != nil {
 		return err
@@ -461,7 +481,7 @@ func (p *CivoProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 
 	// Fetch records for each zone
 	for _, zone := range zones {
-		records, err := p.fetchRecords(ctx, zone.ID)
+		records, err := p.fetchRecords(zone.ID)
 
 		if err != nil {
 			return err
@@ -492,7 +512,7 @@ func (p *CivoProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 		return err
 	}
 
-	return p.submitChanges(ctx, civoChange)
+	return p.submitChanges(civoChange)
 }
 
 func endpointsByZone(zoneNameIDMapper provider.ZoneIDName, endpoints []*endpoint.Endpoint) map[string][]*endpoint.Endpoint {

@@ -23,136 +23,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/pkg/events"
-	"sigs.k8s.io/external-dns/pkg/metrics"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
 	"sigs.k8s.io/external-dns/registry"
 	"sigs.k8s.io/external-dns/source"
 )
-
-var (
-	registryErrorsTotal = metrics.NewCounterWithOpts(
-		prometheus.CounterOpts{
-			Subsystem: "registry",
-			Name:      "errors_total",
-			Help:      "Number of Registry errors.",
-		},
-	)
-	sourceErrorsTotal = metrics.NewCounterWithOpts(
-		prometheus.CounterOpts{
-			Subsystem: "source",
-			Name:      "errors_total",
-			Help:      "Number of Source errors.",
-		},
-	)
-	sourceEndpointsTotal = metrics.NewGaugeWithOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "source",
-			Name:      "endpoints_total",
-			Help:      "Number of Endpoints in all sources",
-		},
-	)
-	registryEndpointsTotal = metrics.NewGaugeWithOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "registry",
-			Name:      "endpoints_total",
-			Help:      "Number of Endpoints in the registry",
-		},
-	)
-	lastSyncTimestamp = metrics.NewGaugeWithOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "controller",
-			Name:      "last_sync_timestamp_seconds",
-			Help:      "Timestamp of last successful sync with the DNS provider",
-		},
-	)
-	lastReconcileTimestamp = metrics.NewGaugeWithOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "controller",
-			Name:      "last_reconcile_timestamp_seconds",
-			Help:      "Timestamp of last attempted sync with the DNS provider",
-		},
-	)
-	controllerNoChangesTotal = metrics.NewCounterWithOpts(
-		prometheus.CounterOpts{
-			Subsystem: "controller",
-			Name:      "no_op_runs_total",
-			Help:      "Number of reconcile loops ending up with no changes on the DNS provider side.",
-		},
-	)
-	deprecatedRegistryErrors = metrics.NewCounterWithOpts(
-		prometheus.CounterOpts{
-			Subsystem: "registry",
-			Name:      "errors_total",
-			Help:      "Number of Registry errors.",
-		},
-	)
-	deprecatedSourceErrors = metrics.NewCounterWithOpts(
-		prometheus.CounterOpts{
-			Subsystem: "source",
-			Name:      "errors_total",
-			Help:      "Number of Source errors.",
-		},
-	)
-
-	registryRecords = metrics.NewGaugedVectorOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "registry",
-			Name:      "records",
-			Help:      "Number of registry records partitioned by label name (vector).",
-		},
-		[]string{"record_type"},
-	)
-
-	sourceRecords = metrics.NewGaugedVectorOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "source",
-			Name:      "records",
-			Help:      "Number of source records partitioned by label name (vector).",
-		},
-		[]string{"record_type"},
-	)
-
-	verifiedRecords = metrics.NewGaugedVectorOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "controller",
-			Name:      "verified_records",
-			Help:      "Number of DNS records that exists both in source and registry (vector).",
-		},
-		[]string{"record_type"},
-	)
-
-	consecutiveSoftErrors = metrics.NewGaugeWithOpts(
-		prometheus.GaugeOpts{
-			Subsystem: "controller",
-			Name:      "consecutive_soft_errors",
-			Help:      "Number of consecutive soft errors in reconciliation loop.",
-		},
-	)
-)
-
-func init() {
-	metrics.RegisterMetric.MustRegister(registryErrorsTotal)
-	metrics.RegisterMetric.MustRegister(sourceErrorsTotal)
-	metrics.RegisterMetric.MustRegister(sourceEndpointsTotal)
-	metrics.RegisterMetric.MustRegister(registryEndpointsTotal)
-	metrics.RegisterMetric.MustRegister(lastSyncTimestamp)
-	metrics.RegisterMetric.MustRegister(lastReconcileTimestamp)
-	metrics.RegisterMetric.MustRegister(deprecatedRegistryErrors)
-	metrics.RegisterMetric.MustRegister(deprecatedSourceErrors)
-	metrics.RegisterMetric.MustRegister(controllerNoChangesTotal)
-
-	metrics.RegisterMetric.MustRegister(registryRecords)
-	metrics.RegisterMetric.MustRegister(sourceRecords)
-	metrics.RegisterMetric.MustRegister(verifiedRecords)
-
-	metrics.RegisterMetric.MustRegister(consecutiveSoftErrors)
-}
 
 // Controller is responsible for orchestrating the different components.
 // It works in the following way:
@@ -176,6 +55,8 @@ type Controller struct {
 	// The lastRunAt used for throttling and batching reconciliation
 	lastRunAt    time.Time
 	EventEmitter events.EventEmitter
+	// StatusReporter is nil unless the crd source is enabled.
+	StatusReporter StatusReporter
 	// MangedRecordTypes are DNS record types that will be considered for management.
 	ManagedRecordTypes []string
 	// ExcludeRecordTypes are DNS record types that will be excluded from management.
@@ -184,6 +65,8 @@ type Controller struct {
 	MinEventSyncInterval time.Duration
 	// Old txt-owner value we need to migrate from
 	TXTOwnerOld string
+	// CRDSourceKind is the Kind reported for "crd/" deletes.
+	CRDSourceKind string
 }
 
 // RunOnce runs a single iteration of a reconciliation loop.
@@ -194,8 +77,6 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 	c.lastRunAt = time.Now()
 	c.runAtMutex.Unlock()
 
-	regMetrics := newMetricsRecorder()
-
 	regRecords, err := c.Registry.Records(ctx)
 	if err != nil {
 		registryErrorsTotal.Counter.Inc()
@@ -205,7 +86,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 
 	registryEndpointsTotal.Gauge.Set(float64(len(regRecords)))
 
-	countAddressRecords(regMetrics, regRecords, registryRecords)
+	countAddressRecords(regRecords, registryRecords)
 
 	ctx = context.WithValue(ctx, provider.RecordsContextKey, regRecords)
 
@@ -218,11 +99,8 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 
 	sourceEndpointsTotal.Gauge.Set(float64(len(sourceEndpoints)))
 
-	sourceMetrics := newMetricsRecorder()
-	countAddressRecords(sourceMetrics, sourceEndpoints, sourceRecords)
-
-	vaMetrics := newMetricsRecorder()
-	countMatchingAddressRecords(vaMetrics, sourceEndpoints, regRecords, verifiedRecords)
+	countAddressRecords(sourceEndpoints, sourceRecords)
+	countMatchingAddressRecords(sourceEndpoints, regRecords, verifiedRecords)
 
 	endpoints, err := c.Registry.AdjustEndpoints(sourceEndpoints)
 	if err != nil {
@@ -238,7 +116,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		ManagedRecords: c.ManagedRecordTypes,
 		ExcludeRecords: c.ExcludeRecordTypes,
 		OwnerID:        c.Registry.OwnerID(),
-		OldOwnerId:     c.TXTOwnerOld,
+		OldOwnerID:     c.TXTOwnerOld,
 	}
 
 	plan = plan.Calculate()
@@ -248,14 +126,18 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		if err != nil {
 			registryErrorsTotal.Counter.Inc()
 			deprecatedRegistryErrors.Counter.Inc()
+			emitChangeEvent(c.EventEmitter, plan.Changes, events.RecordError, c.CRDSourceKind)
+			reportSyncStatus(ctx, c.StatusReporter, plan, err)
 			return err
-		} else {
-			emitChangeEvent(c.EventEmitter, *plan.Changes, events.RecordReady)
 		}
+		emitChangeEvent(c.EventEmitter, plan.Changes, events.RecordReady, c.CRDSourceKind)
 	} else {
 		controllerNoChangesTotal.Counter.Inc()
 		log.Info("All records are already up to date")
 	}
+
+	// Also when nothing changed: in-sync objects still need a status.
+	reportSyncStatus(ctx, c.StatusReporter, plan, nil)
 
 	lastSyncTimestamp.Gauge.SetToCurrentTime()
 
@@ -278,43 +160,6 @@ func latest(r time.Time, times ...time.Time) time.Time {
 		}
 	}
 	return r
-}
-
-// Counts the intersections of records in endpoint and registry.
-func countMatchingAddressRecords(rec *metricsRecorder, endpoints []*endpoint.Endpoint, registryRecords []*endpoint.Endpoint, metric metrics.GaugeVecMetric) {
-	recordsMap := make(map[string]map[string]struct{})
-	for _, regRecord := range registryRecords {
-		if _, found := recordsMap[regRecord.DNSName]; !found {
-			recordsMap[regRecord.DNSName] = make(map[string]struct{})
-		}
-		recordsMap[regRecord.DNSName][regRecord.RecordType] = struct{}{}
-	}
-
-	for _, sourceRecord := range endpoints {
-		if _, found := recordsMap[sourceRecord.DNSName]; found {
-			if _, ok := recordsMap[sourceRecord.DNSName][sourceRecord.RecordType]; ok {
-				rec.recordEndpointType(sourceRecord.RecordType)
-			}
-		}
-	}
-
-	for _, rt := range endpoint.KnownRecordTypes {
-		metric.SetWithLabels(rec.loadFloat64(rt), rt)
-	}
-}
-
-// countAddressRecords updates the metricsRecorder with the count of each record type
-// found in the provided endpoints slice, and sets the corresponding metrics for each
-// known DNS record type using the sourceRecords metric.
-func countAddressRecords(rec *metricsRecorder, endpoints []*endpoint.Endpoint, metric metrics.GaugeVecMetric) {
-	// compute the number of records per type
-	for _, endPoint := range endpoints {
-		rec.recordEndpointType(endPoint.RecordType)
-	}
-	// set metrics for each record type
-	for _, rt := range endpoint.KnownRecordTypes {
-		metric.SetWithLabels(rec.loadFloat64(rt), rt)
-	}
 }
 
 // ScheduleRunOnce makes sure execution happens at most once per interval.
@@ -341,7 +186,7 @@ func (c *Controller) ShouldRunOnce(now time.Time) bool {
 }
 
 // Run runs RunOnce in a loop with a delay until context is canceled
-func (c *Controller) Run(ctx context.Context) {
+func (c *Controller) Run(ctx context.Context) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var softErrorCount int
@@ -353,7 +198,7 @@ func (c *Controller) Run(ctx context.Context) {
 					consecutiveSoftErrors.Gauge.Set(float64(softErrorCount))
 					log.Errorf("Failed to do run once: %v (consecutive soft errors: %d)", err, softErrorCount)
 				} else {
-					log.Fatalf("Failed to do run once: %v", err) // nolint: gocritic // exitAfterDefer
+					return fmt.Errorf("failed to do run once: %w", err)
 				}
 			} else {
 				if softErrorCount > 0 {
@@ -367,7 +212,7 @@ func (c *Controller) Run(ctx context.Context) {
 		case <-ticker.C:
 		case <-ctx.Done():
 			log.Info("Terminating main controller loop")
-			return
+			return nil
 		}
 	}
 }

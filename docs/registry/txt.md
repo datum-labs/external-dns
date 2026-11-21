@@ -42,6 +42,15 @@ For the domain `www.ex.com` the expected result is
 | `www-.cname.ex.com.` |  `TXT`  |
 |    `www.ex.com.`     | `CNAME` |
 
+### AWS A ALIAS records
+
+[AWS ALIAS records](../tutorials/aws.md#alias) are stored in Route 53 as
+[`A`/`AAAA` records](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-choosing-alias-non-alias.html),
+so their ownership TXT uses the matching `a-`/`aaaa-` prefix. For `A` ALIAS records this replaces the
+legacy `cname-` prefix: the old `cname-` record is still recognized (ownership is preserved), the `a-`
+record is created on the next reconciliation, and the obsolete `cname-` is left in place with a warning.
+See [#2903](https://github.com/kubernetes-sigs/external-dns/issues/2903).
+
 ### Manually Cleanup Legacy TXT Records
 
 > While deleting registry TXT records won't cause downtime, a well-thought-out migration and cleanup plan is crucial.
@@ -51,6 +60,9 @@ Occasionally, it may be necessary to remove outdated TXT records from your regis
 An example script for AWS can be found in [scripts/aws-cleanup-legacy-txt-records.py](../../scripts/aws-cleanup-legacy-txt-records.py) with instructions on how to run it.
 The script performs targeted deletion of TXT records that include `ResourceRecords` matching the `heritage=external-dns,external-dns/owner=default` or similar pattern.
 In the event of unintended deletion of all TXT records managed by `external-dns`, `external-dns` will initiate a full DNS record regeneration, along with`TXT` and `non-TXT` records. Just be aware, this operation's duration is directly proportional to the DNS estate size."
+
+To remove the obsolete `cname-` records left by the AWS A ALIAS migration, run the script with
+`--alias-cname-cleanup`, which deletes a `cname-` record only when its `a-` counterpart exists.
 
 ### For version `v0.16.0 & v0.16.1`
 
@@ -118,6 +130,90 @@ Encryption is enabled by setting the `--txt-encrypt-enabled`. The 32-byte AES-25
 key must be specified in URL-safe base64 form (recommended) or be a plain text, using the `--txt-encrypt-aes-key=<key>` flag.
 
 Note that the key used for encryption should be a secure key and properly managed to ensure the security of your TXT records.
+
+> **Note:** Encryption is best-effort. The stored value is produced by the Go standard library
+> (AES-GCM over a gzip-compressed payload), and its exact bytes are not guaranteed to stay stable
+> across Go toolchain or dependency upgrades. A future change could affect the ability to update or
+> delete existing encrypted records on providers that match by value. Decryption of already-written
+> records is not expected to be affected. Enable encryption with this in mind.
+
+### AES Key Rotation
+
+Rotating the encryption key is a manual, stop-the-world operation — external-dns only holds one key
+at a time and cannot decrypt records under an old key while encrypting new ones mid-flight.
+
+Current behavior when a TXT ownership record cannot be decrypted (for example after the AES key has
+changed):
+
+1. AES-GCM authentication fails under the current key, so label parsing returns an error and
+   external-dns cannot recover the owner metadata.
+2. It doesn't error out or crash. It quietly treats the record as unowned (no owner label).
+3. Because it no longer recognizes the record as its own, it refuses to update or delete it going
+   forward.
+4. The record already exists, so external-dns:
+   - won't try to re-create it or take ownership of it
+   - won't apply any future change to its desired value either, since it doesn't own it
+   - lets it silently drift, unmanaged
+5. Anything created afterward works fine, since it's encrypted fresh under whatever key is currently
+   configured.
+
+This is why key rotation specifically needs the migration below rather than just swapping the flag.
+
+#### Migration procedure
+
+1. **Stop external-dns** (scale the deployment to 0 or pause it) before starting the migration below,
+   so nothing else is writing to the zone concurrently.
+2. For every existing encrypted TXT record in the zone — there's no ready-made tool for this, write a
+   small CLI using your DNS provider's SDK to list them:
+   - Decrypt with the old key: `endpoint.NewLabelsFromString(value, oldKey)`.
+   - Delete the `txt-encryption-nonce` entry from the returned map so a fresh nonce is generated on
+     re-encrypt.
+   - Re-encrypt with the new key: `labels.Serialize(true, true, newKey)` (`withQuotes=true`,
+     `txtEncryptEnabled=true`).
+   - Write the new value back to the provider via its API.
+3. Once all records are migrated, update `--txt-encrypt-aes-key` (or the backing secret) to the new
+   key.
+4. Run external-dns once with `--dry-run` (pointed at the new key) and check the logs before applying
+   for real:
+   - Confirm no unexpected creates/updates/deletes (DNS record drift).
+   - Confirm no decryption errors are logged.
+5. Restart external-dns without `--dry-run`. On the next reconcile it will decrypt every record
+   successfully under the new key.
+
+> **Note:** There is no built-in `external-dns` command or generic CLI provided by this repository
+> for this — you'll need to build one against your provider's SDK. If you build something generic
+> enough to be reusable across providers, or learn something worth sharing along the way, please
+> consider contributing it back or updating this guide.
+
+### Recommended Practices
+
+- **Run two (or more) external-dns instances instead of encrypting everything.** One instance
+  without `--txt-encrypt-enabled` for records that don't carry sensitive metadata; a second instance
+  with `--txt-encrypt-enabled` + `--txt-encrypt-aes-key`, scoped to only the resources that actually
+  need it.
+- **Don't encrypt by default.** Encryption isn't free — it adds CPU overhead per reconcile and
+  carries the risk noted above. Private / internal-only records whose metadata (ingress name,
+  namespace, resource path) isn't sensitive generally don't need it.
+- **Scope the encrypting instance with `--label-filter`** so only resources explicitly opted in get
+  encrypted, rather than blanket-encrypting a whole cluster. Pick one label convention and apply it
+  consistently:
+
+  | Label key                   | Label value    | `--label-filter`                                    |
+  | ---------------------------- | -------------- | ---------------------------------------------------- |
+  | `external-dns/txt-encrypt`   | `true`         | `--label-filter=external-dns/txt-encrypt=true`        |
+  | `external-dns.io/sensitive`  | `true`         | `--label-filter=external-dns.io/sensitive=true`       |
+  | `security-tier`              | `confidential` | `--label-filter=security-tier=confidential`           |
+
+  Point the non-encrypting instance at the inverse selector (e.g.
+  `--label-filter='external-dns/txt-encrypt notin (true)'`) so the two instances don't both pick up
+  the same resource. Keep the label convention stable: a resource that moves between the two filters
+  forces an ownership handoff and a rewrite of its TXT record (encrypted to plain, or the reverse).
+- **Have a disaster-recovery plan for TXT records, regardless of encryption.** TXT records are the
+  only record of external-dns's ownership metadata — losing or corrupting them (accidental deletion,
+  botched migration, provider outage) can cause external-dns to lose track of what it owns, leading
+  to orphaned records or unintended recreation/deletion. Back up zone contents (including TXT
+  records) and document a recovery procedure before you need it; this applies equally whether
+  encryption is enabled or not.
 
 ### Generating the TXT Encryption Key
 
@@ -208,6 +304,8 @@ Caching is enabled by specifying a cache duration with the `--txt-cache-interval
 
 ## OwnerID migration
 
+> Automating DNS migrations with third-party tools can be risky. DNS is often business-critical, and without deep understanding of the environment, 3rd party automation tools can do more harm than good.
+
 The owner ID of the TXT records managed by external-dns instance can be updated.
 
 When `--migrate-from-txt-owner` is set, it will enable the migration checks
@@ -238,7 +336,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.20.0
+        image: registry.k8s.io/external-dns/external-dns:v0.23.0
         imagePullPolicy: Always
         args:
         - "--txt-prefix=%{record_type}-"
@@ -276,7 +374,7 @@ spec:
       containers:
       - name: external-dns
         imagePullPolicy: Always
-        image: registry.k8s.io/external-dns/external-dns:v0.20.0
+        image: registry.k8s.io/external-dns/external-dns:v0.23.0
         args:
         - "--txt-prefix=%{record_type}-"
         - "--txt-cache-interval=2m"
@@ -293,3 +391,35 @@ spec:
 
 If you didn't set the owner ID, the value set by external-dns is `default`. You can set the
 `--migrate-from-txt-owner` flag to `default` to migrate the associated records.
+
+### OwnerID migration: multi-cluster considerations
+
+> Warning: The `--migrate-from-txt-owner` flag combined with `policy=sync` can be unsafe in shared hosted zones when multiple clusters previously used the same TXT owner value (for example `default`).
+
+In a shared hosted zone, if one cluster runs ExternalDNS with `policy=sync` and `--migrate-from-txt-owner=default`, it may attempt to delete DNS records that belong to other clusters which still use `owner=default`.
+To avoid this, do not share the same TXT owner value across clusters in any zone where `policy=sync` or migration flags will be used.
+
+#### Per-cluster owner IDs
+
+For multi-cluster setups sharing a hosted zone:
+
+- Assign a **unique** `--txt-owner-id` to each cluster (for example `cluster1`, `cluster2`) and document this convention clearly in your platform configuration.
+- Avoid using a common owner such as `default` across clusters in a shared zone if any cluster will run with `policy=sync` or use `--migrate-from-txt-owner`.
+
+When several clusters must publish the *same* hostname, see [Multi-Cluster Shared DNS Records](../advanced/multi-cluster-shared-records.md).
+
+#### Example migration sequence for shared zones
+
+When migrating from a shared owner (such as `default`) in a shared hosted zone:
+
+1. While still using `policy=upsert-only` (or equivalent), roll out cluster-specific `--txt-owner-id` values and ensure *new* records are created with the cluster’s own owner ID.
+2. Avoid `--migrate-from-txt-owner=<old-owner>` unless you can guarantee that only a single cluster has records with `<old-owner>` in that hosted zone, or perform the migration in an isolated zone where only that cluster writes records.
+
+### When to avoid owner migration
+
+The following pattern is **not recommended** and may cause record deletion for other clusters:
+
+- Multiple clusters share a Route53 hosted zone and all existing records use `owner=default`.
+- Only one cluster is upgraded to use `policy=sync`, `--txt-owner-id=<cluster-name>`, and `--migrate-from-txt-owner=default`, while other clusters still use `owner=default`.
+
+In this situation, the upgraded cluster can treat other clusters’ records as orphans and schedule them for deletion during synchronization. Prefer per-cluster zones, manual TXT record adjustment, or fully coordinated migration of all clusters if the migration flag must be used.

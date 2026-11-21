@@ -4,20 +4,22 @@ linters:
   default: none
   enable: # golangci-lint help linters
     - copyloopvar # A linter detects places where loop variables are copied. https://golangci-lint.run/docs/linters/configuration/#copyloopvar
+    - depguard # Checks imports against a deny list. https://golangci-lint.run/docs/linters/configuration/#depguard
     - dogsled # Checks assignments with too many blank identifiers. https://golangci-lint.run/docs/linters/configuration/#dogsled
     - dupword # Duplicate word. https://golangci-lint.run/docs/linters/configuration/#dupword
     - goprintffuncname
     - govet
     - ineffassign
     - misspell
-    - revive
+    - revive # https://golangci-lint.run/docs/linters/configuration/#revive
     - recvcheck # Checks for receiver type consistency. https://golangci-lint.run/docs/linters/configuration/#recvcheck
     - rowserrcheck # Checks whether Rows.Err of rows is checked successfully.
     - errchkjson # Checks types passed to the json encoding functions. ref: https://golangci-lint.run/docs/linters/configuration/#errchkjson
     - errorlint # Checking for unchecked errors in Go code https://golangci-lint.run/docs/linters/configuration/#errorlint
     - staticcheck
     - unconvert
-    - unused
+    - unused # https://golangci-lint.run/docs/linters/configuration/#unused
+    - unparam # https://golangci-lint.run/docs/linters/configuration/#unparam
     - usestdlibvars # A linter that detect the possibility to use variables/constants from the Go standard library. https://golangci-lint.run/docs/linters/configuration/#usestdlibvars
     - whitespace
     - decorder # Check declaration order and count of types, constants, variables and functions. https://golangci-lint.run/docs/linters/configuration/#decorder
@@ -31,10 +33,18 @@ linters:
     - gocritic # Analyze source code for various issues, including bugs, performance hiccups, and non-idiomatic coding practices. https://golangci-lint.run/docs/linters/configuration/#gocritic
     - gochecknoinits # Checks that there are no init() functions in the code. https://golangci-lint.run/docs/linters/configuration/#gochecknoinits
     - goconst # Finds repeated strings that could be replaced by a constant. https://golangci-lint.run/docs/linters/configuration/#goconst
+    - modernize # A suite of analyzers that suggest simplifications to Go code, using modern language and library features. https://golangci-lint.run/docs/linters/configuration/#modernize
 
     # tests
     - testifylint # Checks usage of github.com/stretchr/testify. https://golangci-lint.run/docs/linters/configuration/#testifylint
+    - usetesting # Reports uses of functions with replacement inside the testing package.
   settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: k8s.io/utils/set
+              desc: use sigs.k8s.io/external-dns/internal/sets instead
     exhaustive:
       default-signifies-exhaustive: false
     misspell:
@@ -43,10 +53,11 @@ linters:
       rules:
         - name: confusing-naming
           disabled: true
+        - name: unused-parameter # https://github.com/mgechev/revive/blob/HEAD/RULES_DESCRIPTIONS.md#unused-parameter
+          disabled: false
     cyclop: # Lower cyclomatic complexity threshold after the max complexity is lowered
-      max-complexity: 37 # Controller/execute.go:147:1: calculated cyclomatic complexity for function buildProvider is 37
+      max-complexity: 32 # See https://github.com/kubernetes-sigs/external-dns/issues/5419
     goconst:
-      min-occurrences: 3
       # Ignore well-known DNS record types, boolean strings, and common values
       ignore-string-values:
         - "^(A|AAAA|ALIAS|CNAME|MX|NS|PTR|SRV|TXT)$"  # DNS record types
@@ -61,9 +72,11 @@ linters:
       # (in addition to default
       #   suite-thelper
       # ).
-      # TODO: enable in follow-up
-      disable:
-        - require-error
+    usetesting:
+      # Enable/disable `context.Background()` detections.
+      context-background: true
+      # Enable/disable `context.TODO()` detections.
+      context-todo: true
   exclusions:
     generated: lax
     presets:
@@ -77,7 +90,6 @@ linters:
           - depguard
           - dogsled
           - goprintffuncname
-          - govet
           - ineffassign
           - misspell
           - nolintlint
@@ -85,7 +97,6 @@ linters:
           - staticcheck
           - structcheck
           - unconvert
-          - unused
           - varcheck
           - whitespace
           - goconst
@@ -93,10 +104,13 @@ linters:
       # TODO: skiip as will require design changes
       - linters:
           - nilnil
-        path: istio_virtualservice.go|fqdn.go|cloudflare.go
+        path: istio_virtualservice.go|fqdn.go|cloudflare_custom_hostnames.go
       - linters:
           - gochecknoinits
-        path: ^(.*/controller\.go|internal/.*/init\.go|pkg/.*/metrics\.go|.*/webhook\.go|.*/http\.go|apis/.*\.go|.*/cached_provider\.go)$
+        path: ^(internal/.*/init\.go|.*/metrics\.go|.*/webhook\.go|.*/http\.go|apis/.*\.go|.*/cached_provider\.go)$
+      - linters:
+          - modernize
+        path: ^(apis/.*\.go)$
     paths:
       - endpoint/zz_generated.deepcopy.go
       - third_party$
@@ -116,4 +130,3 @@ formatters:
       - third_party$
       - builtin$
       - examples$
-      - _test\.go

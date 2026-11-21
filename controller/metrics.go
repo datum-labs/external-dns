@@ -16,39 +16,179 @@ limitations under the License.
 
 package controller
 
-import "sigs.k8s.io/external-dns/endpoint"
+import (
+	"github.com/prometheus/client_golang/prometheus"
 
-type metricsRecorder struct {
-	counterPerEndpointType map[string]int
-}
+	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/internal/sets"
+	"sigs.k8s.io/external-dns/pkg/metrics"
+)
 
-func newMetricsRecorder() *metricsRecorder {
-	return &metricsRecorder{
-		counterPerEndpointType: map[string]int{
-			endpoint.RecordTypeA:     0,
-			endpoint.RecordTypeAAAA:  0,
-			endpoint.RecordTypeCNAME: 0,
-			endpoint.RecordTypeTXT:   0,
-			endpoint.RecordTypeSRV:   0,
-			endpoint.RecordTypeNS:    0,
-			endpoint.RecordTypePTR:   0,
-			endpoint.RecordTypeMX:    0,
-			endpoint.RecordTypeNAPTR: 0,
+const (
+	subsystemRegistry   = "registry"
+	subsystemSource     = "source"
+	subsystemController = "controller"
+
+	metricErrorsTotal = "errors_total"
+
+	labelRecordType = "record_type"
+)
+
+var (
+	registryErrorsTotal = metrics.NewCounterWithOpts(
+		prometheus.CounterOpts{
+			Subsystem: subsystemRegistry,
+			Name:      metricErrorsTotal,
+			Help:      "Number of Registry errors.",
 		},
+	)
+	sourceErrorsTotal = metrics.NewCounterWithOpts(
+		prometheus.CounterOpts{
+			Subsystem: subsystemSource,
+			Name:      metricErrorsTotal,
+			Help:      "Number of Source errors.",
+		},
+	)
+	sourceEndpointsTotal = metrics.NewGaugeWithOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemSource,
+			Name:      "endpoints_total",
+			Help:      "Number of Endpoints in all sources",
+		},
+	)
+	registryEndpointsTotal = metrics.NewGaugeWithOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemRegistry,
+			Name:      "endpoints_total",
+			Help:      "Number of Endpoints in the registry",
+		},
+	)
+	lastSyncTimestamp = metrics.NewGaugeWithOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemController,
+			Name:      "last_sync_timestamp_seconds",
+			Help:      "Timestamp of last successful sync with the DNS provider",
+		},
+	)
+	lastReconcileTimestamp = metrics.NewGaugeWithOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemController,
+			Name:      "last_reconcile_timestamp_seconds",
+			Help:      "Timestamp of last attempted sync with the DNS provider",
+		},
+	)
+	controllerNoChangesTotal = metrics.NewCounterWithOpts(
+		prometheus.CounterOpts{
+			Subsystem: subsystemController,
+			Name:      "no_op_runs_total",
+			Help:      "Number of reconcile loops ending up with no changes on the DNS provider side.",
+		},
+	)
+	deprecatedRegistryErrors = metrics.NewCounterWithOpts(
+		prometheus.CounterOpts{
+			Subsystem: subsystemRegistry,
+			Name:      metricErrorsTotal,
+			Help:      "Number of Registry errors.",
+		},
+	)
+	deprecatedSourceErrors = metrics.NewCounterWithOpts(
+		prometheus.CounterOpts{
+			Subsystem: subsystemSource,
+			Name:      metricErrorsTotal,
+			Help:      "Number of Source errors.",
+		},
+	)
+
+	registryRecords = metrics.NewGaugedVectorOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemRegistry,
+			Name:      "records",
+			Help:      "Number of registry records partitioned by label name (vector).",
+		},
+		[]string{labelRecordType},
+	)
+
+	sourceRecords = metrics.NewGaugedVectorOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemSource,
+			Name:      "records",
+			Help:      "Number of source records partitioned by label name (vector).",
+		},
+		[]string{labelRecordType},
+	)
+
+	verifiedRecords = metrics.NewGaugedVectorOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemController,
+			Name:      "verified_records",
+			Help:      "Number of DNS records that exists both in source and registry (vector).",
+		},
+		[]string{labelRecordType},
+	)
+
+	consecutiveSoftErrors = metrics.NewGaugeWithOpts(
+		prometheus.GaugeOpts{
+			Subsystem: subsystemController,
+			Name:      "consecutive_soft_errors",
+			Help:      "Number of consecutive soft errors in reconciliation loop.",
+		},
+	)
+)
+
+func init() {
+	metrics.RegisterMetric.MustRegister(registryErrorsTotal)
+	metrics.RegisterMetric.MustRegister(sourceErrorsTotal)
+	metrics.RegisterMetric.MustRegister(sourceEndpointsTotal)
+	metrics.RegisterMetric.MustRegister(registryEndpointsTotal)
+	metrics.RegisterMetric.MustRegister(lastSyncTimestamp)
+	metrics.RegisterMetric.MustRegister(lastReconcileTimestamp)
+	metrics.RegisterMetric.MustRegister(deprecatedRegistryErrors)
+	metrics.RegisterMetric.MustRegister(deprecatedSourceErrors)
+	metrics.RegisterMetric.MustRegister(controllerNoChangesTotal)
+
+	metrics.RegisterMetric.MustRegister(registryRecords)
+	metrics.RegisterMetric.MustRegister(sourceRecords)
+	metrics.RegisterMetric.MustRegister(verifiedRecords)
+
+	metrics.RegisterMetric.MustRegister(consecutiveSoftErrors)
+}
+
+type dnsKey struct {
+	name       string
+	recordType string
+}
+
+// countMatchingAddressRecords counts records that exist in both endpoints and registry.
+func countMatchingAddressRecords(endpoints []*endpoint.Endpoint, registryRecords []*endpoint.Endpoint, metric metrics.GaugeVecMetric) {
+	metric.Gauge.Reset()
+
+	registry := make(sets.Set[dnsKey], len(registryRecords))
+	for _, r := range registryRecords {
+		registry.Insert(dnsKey{r.DNSName, r.RecordType})
+	}
+
+	counts := make(map[string]float64)
+	for _, ep := range endpoints {
+		if registry.Has(dnsKey{ep.DNSName, ep.RecordType}) {
+			counts[ep.RecordType]++
+		}
+	}
+
+	for recordType, count := range counts {
+		metric.AddWithLabels(count, recordType)
 	}
 }
 
-func (m *metricsRecorder) recordEndpointType(endpointType string) {
-	m.counterPerEndpointType[endpointType]++
-}
+// countAddressRecords counts each record type in the provided endpoints slice.
+func countAddressRecords(endpoints []*endpoint.Endpoint, metric metrics.GaugeVecMetric) {
+	metric.Gauge.Reset()
 
-func (m *metricsRecorder) getEndpointTypeCount(endpointType string) int {
-	if count, ok := m.counterPerEndpointType[endpointType]; ok {
-		return count
+	counts := make(map[string]float64)
+	for _, ep := range endpoints {
+		counts[ep.RecordType]++
 	}
-	return 0
-}
 
-func (m *metricsRecorder) loadFloat64(endpointType string) float64 {
-	return float64(m.getEndpointTypeCount(endpointType))
+	for recordType, count := range counts {
+		metric.AddWithLabels(count, recordType)
+	}
 }

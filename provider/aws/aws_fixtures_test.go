@@ -17,20 +17,20 @@ limitations under the License.
 package aws
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"sigs.k8s.io/external-dns/internal/testutils"
+	logtest "sigs.k8s.io/external-dns/internal/testutils/log"
 )
 
 func TestAWSRecordsV1(t *testing.T) {
 	var zones HostedZones
-	unmarshalTestHelper("/fixtures/160-plus-zones.yaml", &zones, t)
+	unmarshalZonesFixture(&zones, t)
 
 	stub := NewRoute53APIFixtureStub(&zones)
 	provider := providerFilters(stub,
@@ -41,24 +41,24 @@ func TestAWSRecordsV1(t *testing.T) {
 		WithDomainFilters("w2.w1.ex.com", "ex.com"),
 	)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	z, err := provider.Zones(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Len(t, z, 3)
 }
 
 func TestAWSZonesFilterWithTags(t *testing.T) {
 	var zones HostedZones
-	unmarshalTestHelper("/fixtures/160-plus-zones.yaml", &zones, t)
+	unmarshalZonesFixture(&zones, t)
 
 	stub := NewRoute53APIFixtureStub(&zones)
 	provider := providerFilters(stub,
 		WithZoneTagFilters([]string{"level=5", "owner=ext-dns"}),
 	)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	z, err := provider.Zones(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Len(t, z, 24)
 	assert.Equal(t, 17, stub.calls["listtagsforresource"])
 }
@@ -78,14 +78,14 @@ func TestAWSZonesFiltersWithTags(t *testing.T) {
 		tName := fmt.Sprintf("filters=%s and zones=%d", strings.Join(tt.filters, ","), tt.want)
 		t.Run(tName, func(t *testing.T) {
 			var zones HostedZones
-			unmarshalTestHelper("/fixtures/160-plus-zones.yaml", &zones, t)
+			unmarshalZonesFixture(&zones, t)
 
 			stub := NewRoute53APIFixtureStub(&zones)
 			provider := providerFilters(stub,
 				WithZoneTagFilters(tt.filters),
 			)
-			z, err := provider.Zones(context.Background())
-			assert.NoError(t, err)
+			z, err := provider.Zones(t.Context())
+			require.NoError(t, err)
 			assert.Len(t, z, tt.want)
 			assert.Equal(t, tt.calls, stub.calls["listtagsforresource"])
 		})
@@ -94,16 +94,16 @@ func TestAWSZonesFiltersWithTags(t *testing.T) {
 
 func TestAWSZonesSecondRequestHitsTheCache(t *testing.T) {
 	var zones HostedZones
-	unmarshalTestHelper("/fixtures/160-plus-zones.yaml", &zones, t)
+	unmarshalZonesFixture(&zones, t)
 
 	stub := NewRoute53APIFixtureStub(&zones)
 	provider := providerFilters(stub)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err := provider.Zones(ctx)
-	assert.NoError(t, err)
-	hook := testutils.LogsUnderTestWithLogLevel(log.DebugLevel, t)
+	require.NoError(t, err)
+	hook := logtest.LogsUnderTestWithLogLevel(log.DebugLevel, t)
 	_, _ = provider.Zones(ctx)
 
-	testutils.TestHelperLogContainsWithLogLevel("Using cached zones list", log.DebugLevel, hook, t)
+	logtest.TestHelperLogContainsWithLogLevel("Using cached AWS zones", log.DebugLevel, hook, t)
 }

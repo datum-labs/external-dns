@@ -16,72 +16,18 @@ package source
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"sigs.k8s.io/external-dns/internal/testutils"
 
 	networkv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes/fake"
+
 	"sigs.k8s.io/external-dns/endpoint"
+	templatetest "sigs.k8s.io/external-dns/source/template/testutil"
 )
-
-func TestIngressSourceNewNodeSourceWithFqdn(t *testing.T) {
-	for _, tt := range []struct {
-		title            string
-		annotationFilter string
-		fqdnTemplate     string
-		expectError      bool
-	}{
-		{
-			title:        "invalid template",
-			expectError:  true,
-			fqdnTemplate: "{{.Name",
-		},
-		{
-			title:       "valid empty template",
-			expectError: false,
-		},
-		{
-			title:        "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com",
-		},
-		{
-			title:        "complex template",
-			expectError:  false,
-			fqdnTemplate: "{{range .Status.Addresses}}{{if and (eq .Type \"ExternalIP\") (isIPv4 .Address)}}{{.Address | replace \".\" \"-\"}}{{break}}{{end}}{{end}}.ext-dns.test.com",
-		},
-		{
-			title:        "valid template with multiple hosts",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-		},
-	} {
-		t.Run(tt.title, func(t *testing.T) {
-			_, err := NewIngressSource(
-				t.Context(),
-				fake.NewClientset(),
-				"",
-				"",
-				tt.fqdnTemplate,
-				false,
-				false,
-				false,
-				false,
-				labels.Everything(),
-				[]string{},
-			)
-
-			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
 
 func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 
@@ -95,30 +41,26 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			title: "templating resolve Ingress source hostnames to IP",
 			ingresses: []*networkv1.Ingress{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-ingress",
-						Namespace: "default",
-					},
+					Name:      "my-ingress",
+					Namespace: "default",
 					Spec: networkv1.IngressSpec{
-						IngressClassName: testutils.ToPtr("my-ingress"),
+						IngressClassName: new("my-ingress"),
 						Rules: []networkv1.IngressRule{
 							{
 								Host: "example.org",
-								IngressRuleValue: networkv1.IngressRuleValue{
-									HTTP: &networkv1.HTTPIngressRuleValue{
-										Paths: []networkv1.HTTPIngressPath{
-											{
-												Backend: networkv1.IngressBackend{
-													Service: &networkv1.IngressServiceBackend{
-														Name: "my-service",
-														Port: networkv1.ServiceBackendPort{
-															Name: "http",
-														},
+								HTTP: &networkv1.HTTPIngressRuleValue{
+									Paths: []networkv1.HTTPIngressPath{
+										{
+											Backend: networkv1.IngressBackend{
+												Service: &networkv1.IngressServiceBackend{
+													Name: "my-service",
+													Port: networkv1.ServiceBackendPort{
+														Name: "http",
 													},
 												},
-												PathType: testutils.ToPtr(networkv1.PathTypePrefix),
-												Path:     "/",
 											},
+											PathType: new(networkv1.PathTypePrefix),
+											Path:     "/",
 										},
 									},
 								},
@@ -144,12 +86,10 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			title: "templating resolve hostnames with nip.io",
 			ingresses: []*networkv1.Ingress{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-ingress",
-						Namespace: "default",
-					},
+					Name:      "my-ingress",
+					Namespace: "default",
 					Spec: networkv1.IngressSpec{
-						IngressClassName: testutils.ToPtr("my-ingress"),
+						IngressClassName: new("my-ingress"),
 						Rules: []networkv1.IngressRule{
 							{Host: "example.org"},
 						},
@@ -166,22 +106,19 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			fqdnTemplate: `{{ range .Status.LoadBalancer.Ingress }}{{ if contains .Hostname "nip.io" }}example.org{{end}}{{end}}`,
 			expected: []*endpoint.Endpoint{
 				{DNSName: "example.org", RecordType: endpoint.RecordTypeCNAME, Targets: endpoint.Targets{"10.200.130.84.nip.io"}},
-				{DNSName: "example.org", RecordType: endpoint.RecordTypeCNAME, Targets: endpoint.Targets{"10.200.130.84.nip.io"}},
 			},
 		},
 		{
 			title: "templating resolve hostnames with nip.io and target annotation",
 			ingresses: []*networkv1.Ingress{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-ingress",
-						Namespace: "default",
-						Annotations: map[string]string{
-							"external-dns.alpha.kubernetes.io/target": "10.200.130.84",
-						},
+					Name:      "my-ingress",
+					Namespace: "default",
+					Annotations: map[string]string{
+						"external-dns.kubernetes.io/target": "10.200.130.84",
 					},
 					Spec: networkv1.IngressSpec{
-						IngressClassName: testutils.ToPtr("my-ingress"),
+						IngressClassName: new("my-ingress"),
 						Rules: []networkv1.IngressRule{
 							{Host: "example.org"},
 						},
@@ -205,12 +142,10 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			title: "templating resolve hostnames with nip.io and status IP",
 			ingresses: []*networkv1.Ingress{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-ingress",
-						Namespace: "default",
-					},
+					Name:      "my-ingress",
+					Namespace: "default",
 					Spec: networkv1.IngressSpec{
-						IngressClassName: testutils.ToPtr("my-ingress"),
+						IngressClassName: new("my-ingress"),
 						Rules: []networkv1.IngressRule{
 							{
 								Host: "example.org",
@@ -238,12 +173,10 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			title: "templating resolve with different hostnames and rules",
 			ingresses: []*networkv1.Ingress{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-ingress",
-						Namespace: "default",
-					},
+					Name:      "my-ingress",
+					Namespace: "default",
 					Spec: networkv1.IngressSpec{
-						IngressClassName: testutils.ToPtr("ingress-with-override"),
+						IngressClassName: new("ingress-with-override"),
 						Rules: []networkv1.IngressRule{
 							{Host: "foo.bar.com"},
 							{Host: "bar.bar.com"},
@@ -276,12 +209,10 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			title: "templating resolve with rules and tls",
 			ingresses: []*networkv1.Ingress{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-ingress",
-						Namespace: "default",
-					},
+					Name:      "my-ingress",
+					Namespace: "default",
 					Spec: networkv1.IngressSpec{
-						IngressClassName: testutils.ToPtr("ingress-with-override"),
+						IngressClassName: new("ingress-with-override"),
 						Rules: []networkv1.IngressRule{
 							{
 								Host: "foo.bar.com",
@@ -325,15 +256,10 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			src, err := NewIngressSource(
 				t.Context(),
 				kubeClient,
-				"",
-				"",
-				tt.fqdnTemplate,
-				true,
-				false,
-				false,
-				false,
-				labels.Everything(),
-				[]string{},
+				&Config{
+					TemplateEngine: templatetest.MustEngine(t, tt.fqdnTemplate, "", "", true),
+					LabelFilter:    labels.Everything(),
+				},
 			)
 
 			require.NoError(t, err)
@@ -341,7 +267,7 @@ func TestIngressSourceFqdnTemplatingExamples(t *testing.T) {
 			endpoints, err := src.Endpoints(t.Context())
 			require.NoError(t, err)
 
-			validateEndpoints(t, endpoints, tt.expected)
+			testutils.ValidateEndpoints(t, endpoints, tt.expected)
 		})
 	}
 }

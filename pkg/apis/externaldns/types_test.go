@@ -17,21 +17,19 @@ limitations under the License.
 package externaldns
 
 import (
-	"fmt"
-	"os"
-	"reflect"
 	"regexp"
-	"sort"
 	"testing"
 	"time"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/internal/flags"
+	"sigs.k8s.io/external-dns/internal/testutils"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/rest"
 )
 
 var (
@@ -39,22 +37,25 @@ var (
 		APIServerURL:                           "",
 		KubeConfig:                             "",
 		RequestTimeout:                         time.Second * 30,
+		KubeAPIRequestTimeout:                  time.Second * 30,
+		KubeAPIQPS:                             int(rest.DefaultQPS),
+		KubeAPIBurst:                           rest.DefaultBurst,
 		GlooNamespaces:                         []string{"gloo-system"},
-		SkipperRouteGroupVersion:               "zalando.org/v1",
 		Sources:                                []string{"service"},
-		Namespace:                              "",
-		AnnotationPrefix:                       "external-dns.alpha.kubernetes.io/",
-		FQDNTemplate:                           "",
+		Namespaces:                             nil,
+		AnnotationPrefix:                       "external-dns.kubernetes.io/",
+		EnableLegacyAnnotationPrefix:           false,
+		FQDNTemplate:                           nil,
 		Compatibility:                          "",
-		Provider:                               "google",
+		Provider:                               ProviderGoogle,
 		GoogleProject:                          "",
 		GoogleBatchChangeSize:                  1000,
 		GoogleBatchChangeInterval:              time.Second,
 		GoogleZoneVisibility:                   "",
 		DomainFilter:                           []string{""},
-		ExcludeDomains:                         []string{""},
+		DomainExclude:                          []string{""},
 		RegexDomainFilter:                      regexp.MustCompile(""),
-		RegexDomainExclusion:                   regexp.MustCompile(""),
+		RegexDomainExclude:                     regexp.MustCompile(""),
 		ZoneNameFilter:                         []string{""},
 		ZoneIDFilter:                           []string{""},
 		AlibabaCloudConfigFile:                 "/etc/kubernetes/alibaba-cloud.json",
@@ -79,6 +80,8 @@ var (
 		AzureResourceGroup:                     "",
 		AzureSubscriptionID:                    "",
 		AzureMaxRetriesCount:                   3,
+		BatchChangeSize:                        200,
+		BatchChangeInterval:                    time.Second,
 		CloudflareProxied:                      false,
 		CloudflareCustomHostnames:              false,
 		CloudflareCustomHostnamesMinTLSVersion: "1.0",
@@ -87,12 +90,6 @@ var (
 		CloudflareDNSRecordsComment:                   "",
 		CloudflareRegionKey:                           "",
 		CoreDNSPrefix:                                 "/skydns/",
-		AkamaiServiceConsumerDomain:                   "",
-		AkamaiClientToken:                             "",
-		AkamaiClientSecret:                            "",
-		AkamaiAccessToken:                             "",
-		AkamaiEdgercPath:                              "",
-		AkamaiEdgercSection:                           "",
 		OCIConfigFile:                                 "/etc/kubernetes/oci.yaml",
 		OCIZoneScope:                                  "GLOBAL",
 		OCIZoneCacheDuration:                          0 * time.Second,
@@ -102,7 +99,7 @@ var (
 		PDNSServer:                                    "http://localhost:8081",
 		PDNSServerID:                                  "localhost",
 		PDNSAPIKey:                                    "",
-		Policy:                                        "sync",
+		Policy:                                        "",
 		Registry:                                      "txt",
 		TXTOwnerID:                                    "default",
 		TXTOwnerOld:                                   "",
@@ -123,18 +120,17 @@ var (
 		ExoscaleAPISecret:                             "",
 		CRDSourceAPIVersion:                           "externaldns.k8s.io/v1alpha1",
 		CRDSourceKind:                                 "DNSEndpoint",
-		TransIPAccountName:                            "",
-		TransIPPrivateKeyFile:                         "",
-		DigitalOceanAPIPageSize:                       50,
 		ManagedDNSRecordTypes:                         []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
 		RFC2136BatchChangeSize:                        50,
 		RFC2136Host:                                   []string{""},
 		RFC2136LoadBalancingStrategy:                  "disabled",
 		OCPRouterName:                                 "default",
-		PiholeApiVersion:                              "5",
 		WebhookProviderURL:                            "http://localhost:8888",
 		WebhookProviderReadTimeout:                    5 * time.Second,
 		WebhookProviderWriteTimeout:                   10 * time.Second,
+		WebhookProviderReadHeaderTimeout:              5 * time.Second,
+		WebhookProviderIdleTimeout:                    30 * time.Second,
+		WebhookProviderMaxBodySize:                    32 << 20,
 		ExcludeUnschedulable:                          true,
 	}
 
@@ -142,26 +138,29 @@ var (
 		APIServerURL:                           "http://127.0.0.1:8080",
 		KubeConfig:                             "/some/path",
 		RequestTimeout:                         time.Second * 77,
+		KubeAPIRequestTimeout:                  time.Second * 77,
+		KubeAPIQPS:                             int(rest.DefaultQPS),
+		KubeAPIBurst:                           rest.DefaultBurst,
 		GlooNamespaces:                         []string{"gloo-not-system", "gloo-second-system"},
-		SkipperRouteGroupVersion:               "zalando.org/v2",
 		Sources:                                []string{"service", "ingress", "connector"},
-		Namespace:                              "namespace",
-		AnnotationPrefix:                       "external-dns.alpha.kubernetes.io/",
+		Namespaces:                             []string{"namespace"},
+		AnnotationPrefix:                       "external-dns.kubernetes.io/",
+		EnableLegacyAnnotationPrefix:           true,
 		IgnoreHostnameAnnotation:               true,
 		IgnoreNonHostNetworkPods:               true,
 		IgnoreIngressTLSSpec:                   true,
 		IgnoreIngressRulesSpec:                 true,
-		FQDNTemplate:                           "{{.Name}}.service.example.com",
+		FQDNTemplate:                           []string{"{{.Name}}.service.example.com"},
 		Compatibility:                          "mate",
-		Provider:                               "google",
+		Provider:                               ProviderGoogle,
 		GoogleProject:                          "project",
 		GoogleBatchChangeSize:                  100,
 		GoogleBatchChangeInterval:              time.Second * 2,
 		GoogleZoneVisibility:                   "private",
 		DomainFilter:                           []string{"example.org", "company.com"},
-		ExcludeDomains:                         []string{"xapi.example.org", "xapi.company.com"},
+		DomainExclude:                          []string{"xapi.example.org", "xapi.company.com"},
 		RegexDomainFilter:                      regexp.MustCompile("(example\\.org|company\\.com)$"),
-		RegexDomainExclusion:                   regexp.MustCompile("xapi\\.(example\\.org|company\\.com)$"),
+		RegexDomainExclude:                     regexp.MustCompile("xapi\\.(example\\.org|company\\.com)$"),
 		ZoneNameFilter:                         []string{"yapi.example.org", "yapi.company.com"},
 		ZoneIDFilter:                           []string{"/hostedzone/ZTST1", "/hostedzone/ZTST2"},
 		TargetNetFilter:                        []string{"10.0.0.0/9", "10.1.0.0/9"},
@@ -188,6 +187,8 @@ var (
 		AzureResourceGroup:                     "arg",
 		AzureSubscriptionID:                    "arg",
 		AzureMaxRetriesCount:                   4,
+		BatchChangeSize:                        200,
+		BatchChangeInterval:                    time.Second,
 		CloudflareProxied:                      true,
 		CloudflareCustomHostnames:              true,
 		CloudflareCustomHostnamesMinTLSVersion: "1.3",
@@ -196,12 +197,6 @@ var (
 		CloudflareRegionalServices:                    true,
 		CloudflareRegionKey:                           "us",
 		CoreDNSPrefix:                                 "/coredns/",
-		AkamaiServiceConsumerDomain:                   "oooo-xxxxxxxxxxxxxxxx-xxxxxxxxxxxxxxxx.luna.akamaiapis.net",
-		AkamaiClientToken:                             "o184671d5307a388180fbf7f11dbdf46",
-		AkamaiClientSecret:                            "o184671d5307a388180fbf7f11dbdf46",
-		AkamaiAccessToken:                             "o184671d5307a388180fbf7f11dbdf46",
-		AkamaiEdgercPath:                              "/home/test/.edgerc",
-		AkamaiEdgercSection:                           "default",
 		OCIConfigFile:                                 "oci.yaml",
 		OCIZoneScope:                                  "PRIVATE",
 		OCIZoneCacheDuration:                          30 * time.Second,
@@ -216,7 +211,7 @@ var (
 		TLSClientCert:                                 "/path/to/cert.pem",
 		TLSClientCertKey:                              "/path/to/key.pem",
 		PodSourceDomain:                               "example.org",
-		Policy:                                        "upsert-only",
+		Policy:                                        "sync",
 		Registry:                                      "noop",
 		TXTOwnerID:                                    "owner-1",
 		TXTPrefix:                                     "associated-txt-record",
@@ -224,6 +219,7 @@ var (
 		TXTCacheInterval:                              12 * time.Hour,
 		Interval:                                      10 * time.Minute,
 		MinEventSyncInterval:                          50 * time.Second,
+		MinTTL:                                        40 * time.Second,
 		Once:                                          true,
 		DryRun:                                        true,
 		UpdateEvents:                                  true,
@@ -239,17 +235,16 @@ var (
 		CRDSourceKind:                                 "Endpoint",
 		NS1Endpoint:                                   "https://api.example.com/v1",
 		NS1IgnoreSSL:                                  true,
-		TransIPAccountName:                            "transip",
-		TransIPPrivateKeyFile:                         "/path/to/transip.key",
-		DigitalOceanAPIPageSize:                       100,
 		ManagedDNSRecordTypes:                         []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS},
 		RFC2136BatchChangeSize:                        100,
 		RFC2136Host:                                   []string{"rfc2136-host1", "rfc2136-host2"},
 		RFC2136LoadBalancingStrategy:                  "round-robin",
-		PiholeApiVersion:                              "6",
 		WebhookProviderURL:                            "http://localhost:8888",
 		WebhookProviderReadTimeout:                    5 * time.Second,
 		WebhookProviderWriteTimeout:                   10 * time.Second,
+		WebhookProviderReadHeaderTimeout:              5 * time.Second,
+		WebhookProviderIdleTimeout:                    30 * time.Second,
+		WebhookProviderMaxBodySize:                    32 << 20,
 		ExcludeUnschedulable:                          false,
 	}
 )
@@ -259,7 +254,7 @@ func TestParseFlags(t *testing.T) {
 		title    string
 		args     []string
 		envVars  map[string]string
-		expected *Config
+		expected func(*Config)
 	}{
 		{
 			title: "default config with minimal flags defined",
@@ -268,8 +263,38 @@ func TestParseFlags(t *testing.T) {
 				"--provider=google",
 				"--openshift-router-name=default",
 			},
-			envVars:  map[string]string{},
-			expected: minimalConfig,
+			envVars: map[string]string{},
+			expected: func(cfg *Config) {
+				assert.Equal(t, minimalConfig, cfg)
+			},
+		},
+		{
+			title: "validate bool flags work as expected",
+			args: []string{
+				"--source=service",
+				"--provider=google",
+				"--aws-evaluate-target-health",
+				"--exclude-unschedulable",
+			},
+			envVars: map[string]string{},
+			expected: func(cfg *Config) {
+				assert.True(t, cfg.AWSEvaluateTargetHealth)
+				assert.True(t, cfg.ExcludeUnschedulable)
+			},
+		},
+		{
+			title: "validate negation flags work as expected",
+			args: []string{
+				"--source=service",
+				"--provider=aws",
+				"--no-aws-evaluate-target-health",
+				"--no-exclude-unschedulable",
+			},
+			envVars: map[string]string{},
+			expected: func(cfg *Config) {
+				assert.False(t, cfg.AWSEvaluateTargetHealth)
+				assert.False(t, cfg.ExcludeUnschedulable)
+			},
 		},
 		{
 			title: "override everything via flags",
@@ -279,7 +304,6 @@ func TestParseFlags(t *testing.T) {
 				"--request-timeout=77s",
 				"--gloo-namespace=gloo-not-system",
 				"--gloo-namespace=gloo-second-system",
-				"--skipper-routegroup-groupversion=zalando.org/v2",
 				"--source=service",
 				"--source=ingress",
 				"--source=connector",
@@ -307,12 +331,6 @@ func TestParseFlags(t *testing.T) {
 				"--cloudflare-regional-services",
 				"--cloudflare-region-key=us",
 				"--coredns-prefix=/coredns/",
-				"--akamai-serviceconsumerdomain=oooo-xxxxxxxxxxxxxxxx-xxxxxxxxxxxxxxxx.luna.akamaiapis.net",
-				"--akamai-client-token=o184671d5307a388180fbf7f11dbdf46",
-				"--akamai-client-secret=o184671d5307a388180fbf7f11dbdf46",
-				"--akamai-access-token=o184671d5307a388180fbf7f11dbdf46",
-				"--akamai-edgerc-path=/home/test/.edgerc",
-				"--akamai-edgerc-section=default",
 				"--inmemory-zone=example.org",
 				"--inmemory-zone=company.com",
 				"--ovh-endpoint=ovh-ca",
@@ -360,8 +378,7 @@ func TestParseFlags(t *testing.T) {
 				"--aws-sd-create-tag=key1=value1",
 				"--aws-sd-create-tag=key2=value2",
 				"--no-aws-evaluate-target-health",
-				"--pihole-api-version=6",
-				"--policy=upsert-only",
+				"--policy=sync",
 				"--registry=noop",
 				"--txt-owner-id=owner-1",
 				"--migrate-from-txt-owner=old-owner",
@@ -370,9 +387,11 @@ func TestParseFlags(t *testing.T) {
 				"--dynamodb-table=custom-table",
 				"--interval=10m",
 				"--min-event-sync-interval=50s",
+				"--min-ttl=40s",
 				"--once",
 				"--dry-run",
 				"--events",
+				"--enable-legacy-annotation-prefix",
 				"--log-format=json",
 				"--metrics-address=127.0.0.1:9099",
 				"--log-level=debug",
@@ -385,9 +404,6 @@ func TestParseFlags(t *testing.T) {
 				"--crd-source-kind=Endpoint",
 				"--ns1-endpoint=https://api.example.com/v1",
 				"--ns1-ignoressl",
-				"--transip-account=transip",
-				"--transip-keyfile=/path/to/transip.key",
-				"--digitalocean-api-page-size=100",
 				"--managed-record-types=A",
 				"--managed-record-types=AAAA",
 				"--managed-record-types=CNAME",
@@ -397,9 +413,12 @@ func TestParseFlags(t *testing.T) {
 				"--rfc2136-load-balancing-strategy=round-robin",
 				"--rfc2136-host=rfc2136-host1",
 				"--rfc2136-host=rfc2136-host2",
+				"--batch-change-size=200",
 			},
-			envVars:  map[string]string{},
-			expected: overriddenConfig,
+			envVars: map[string]string{},
+			expected: func(cfg *Config) {
+				assert.Equal(t, overriddenConfig, cfg)
+			},
 		},
 		{
 			title: "override everything via environment variables",
@@ -436,12 +455,6 @@ func TestParseFlags(t *testing.T) {
 				"EXTERNAL_DNS_CLOUDFLARE_REGIONAL_SERVICES":                      "1",
 				"EXTERNAL_DNS_CLOUDFLARE_REGION_KEY":                             "us",
 				"EXTERNAL_DNS_COREDNS_PREFIX":                                    "/coredns/",
-				"EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN":                      "oooo-xxxxxxxxxxxxxxxx-xxxxxxxxxxxxxxxx.luna.akamaiapis.net",
-				"EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN":                               "o184671d5307a388180fbf7f11dbdf46",
-				"EXTERNAL_DNS_AKAMAI_CLIENT_SECRET":                              "o184671d5307a388180fbf7f11dbdf46",
-				"EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN":                               "o184671d5307a388180fbf7f11dbdf46",
-				"EXTERNAL_DNS_AKAMAI_EDGERC_PATH":                                "/home/test/.edgerc",
-				"EXTERNAL_DNS_AKAMAI_EDGERC_SECTION":                             "default",
 				"EXTERNAL_DNS_OCI_CONFIG_FILE":                                   "oci.yaml",
 				"EXTERNAL_DNS_OCI_ZONE_SCOPE":                                    "PRIVATE",
 				"EXTERNAL_DNS_OCI_ZONES_CACHE_DURATION":                          "30s",
@@ -483,7 +496,7 @@ func TestParseFlags(t *testing.T) {
 				"EXTERNAL_DNS_AWS_SD_CREATE_TAG":                                 "key1=value1\nkey2=value2",
 				"EXTERNAL_DNS_DYNAMODB_TABLE":                                    "custom-table",
 				"EXTERNAL_DNS_PIHOLE_API_VERSION":                                "6",
-				"EXTERNAL_DNS_POLICY":                                            "upsert-only",
+				"EXTERNAL_DNS_POLICY":                                            "sync",
 				"EXTERNAL_DNS_REGISTRY":                                          "noop",
 				"EXTERNAL_DNS_TXT_OWNER_ID":                                      "owner-1",
 				"EXTERNAL_DNS_TXT_PREFIX":                                        "associated-txt-record",
@@ -492,9 +505,11 @@ func TestParseFlags(t *testing.T) {
 				"EXTERNAL_DNS_TXT_NEW_FORMAT_ONLY":                               "1",
 				"EXTERNAL_DNS_INTERVAL":                                          "10m",
 				"EXTERNAL_DNS_MIN_EVENT_SYNC_INTERVAL":                           "50s",
+				"EXTERNAL_DNS_MIN_TTL":                                           "40s",
 				"EXTERNAL_DNS_ONCE":                                              "1",
 				"EXTERNAL_DNS_DRY_RUN":                                           "1",
 				"EXTERNAL_DNS_EVENTS":                                            "1",
+				"EXTERNAL_DNS_ENABLE_LEGACY_ANNOTATION_PREFIX":                   "1",
 				"EXTERNAL_DNS_LOG_FORMAT":                                        "json",
 				"EXTERNAL_DNS_METRICS_ADDRESS":                                   "127.0.0.1:9099",
 				"EXTERNAL_DNS_LOG_LEVEL":                                         "debug",
@@ -507,33 +522,26 @@ func TestParseFlags(t *testing.T) {
 				"EXTERNAL_DNS_CRD_SOURCE_KIND":                                   "Endpoint",
 				"EXTERNAL_DNS_NS1_ENDPOINT":                                      "https://api.example.com/v1",
 				"EXTERNAL_DNS_NS1_IGNORESSL":                                     "1",
-				"EXTERNAL_DNS_TRANSIP_ACCOUNT":                                   "transip",
-				"EXTERNAL_DNS_TRANSIP_KEYFILE":                                   "/path/to/transip.key",
-				"EXTERNAL_DNS_DIGITALOCEAN_API_PAGE_SIZE":                        "100",
 				"EXTERNAL_DNS_MANAGED_RECORD_TYPES":                              "A\nAAAA\nCNAME\nNS",
 				"EXTERNAL_DNS_EXCLUDE_UNSCHEDULABLE":                             "false",
 				"EXTERNAL_DNS_RFC2136_BATCH_CHANGE_SIZE":                         "100",
 				"EXTERNAL_DNS_RFC2136_LOAD_BALANCING_STRATEGY":                   "round-robin",
 				"EXTERNAL_DNS_RFC2136_HOST":                                      "rfc2136-host1\nrfc2136-host2",
+				"EXTERNAL_DNS_BATCH_CHANGE_SIZE":                                 "200",
 			},
-			expected: overriddenConfig,
+			expected: func(cfg *Config) {
+				assert.Equal(t, overriddenConfig, cfg)
+			},
 		},
 	} {
 		t.Run(ti.title, func(t *testing.T) {
-			originalEnv := setEnv(t, ti.envVars)
-			defer func() { restoreEnv(t, originalEnv) }()
+			testutils.TestHelperEnvSetter(t, ti.envVars)
 
 			cfg := NewConfig()
 			require.NoError(t, cfg.ParseFlags(ti.args))
-			assert.Equal(t, ti.expected, cfg)
+			ti.expected(cfg)
 		})
 	}
-}
-
-func TestParseFlagsCobraExecuteError(t *testing.T) {
-	cfg := NewConfig()
-	err := cfg.ParseFlags([]string{"--cli-backend=cobra", "--unknown-flag"})
-	require.Error(t, err)
 }
 
 func TestParseFlagsKingpinParseError(t *testing.T) {
@@ -553,23 +561,8 @@ func TestConfigStringMasksSecureFields(t *testing.T) {
 	require.Contains(t, s, passwordMask)
 }
 
-// helper functions
-
-func setEnv(t *testing.T, env map[string]string) map[string]string {
-	originalEnv := map[string]string{}
-
-	for k, v := range env {
-		originalEnv[k] = os.Getenv(k)
-		require.NoError(t, os.Setenv(k, v))
-	}
-
-	return originalEnv
-}
-
 // Default path should use kingpin and parse flags correctly
 func TestParseFlagsDefaultKingpin(t *testing.T) {
-	t.Setenv("EXTERNAL_DNS_CLI", "")
-
 	args := []string{
 		"--provider=aws",
 		"--source=service",
@@ -586,182 +579,90 @@ func TestParseFlagsDefaultKingpin(t *testing.T) {
 	cfg := NewConfig()
 	require.NoError(t, cfg.ParseFlags(args))
 
-	assert.Equal(t, "aws", cfg.Provider)
+	assert.Equal(t, ProviderAWS, cfg.Provider)
 	assert.ElementsMatch(t, []string{"service", "ingress"}, cfg.Sources)
 	assert.Equal(t, "http://127.0.0.1:8080", cfg.APIServerURL)
 	assert.Equal(t, "/some/path", cfg.KubeConfig)
-	assert.Equal(t, 2*time.Second, cfg.RequestTimeout)
-	assert.Equal(t, "ns", cfg.Namespace)
+	assert.Equal(t, 2*time.Second, cfg.KubeAPIRequestTimeout)
+	assert.Equal(t, []string{"ns"}, cfg.Namespaces)
 	assert.ElementsMatch(t, []string{"example.org", "company.com"}, cfg.DomainFilter)
 	assert.Equal(t, "default", cfg.OCPRouterName)
-}
-
-// When EXTERNAL_DNS_CLI=cobra is set, cobra path should parse the subset of
-// flags it currently binds, yielding parity with kingpin for those fields.
-func TestParseFlagsCobraSwitchParitySubset(t *testing.T) {
-	args := []string{
-		"--provider=aws",
-		"--source=service",
-		"--source=ingress",
-		"--server=http://127.0.0.1:8080",
-		"--kubeconfig=/some/path",
-		"--request-timeout=2s",
-		"--namespace=ns",
-		"--domain-filter=example.org",
-		"--domain-filter=company.com",
-		"--openshift-router-name=default",
-	}
-
-	// Kingpin baseline
-	cfgK := NewConfig()
-	require.NoError(t, cfgK.ParseFlags(args))
-
-	// Cobra path via env switch
-	t.Setenv("EXTERNAL_DNS_CLI", "cobra")
-	cfgC := NewConfig()
-	require.NoError(t, cfgC.ParseFlags(args))
-
-	// Compare selected fields bound in cobra
-	assert.Equal(t, cfgK.Provider, cfgC.Provider)
-	assert.ElementsMatch(t, cfgK.Sources, cfgC.Sources)
-	assert.Equal(t, cfgK.APIServerURL, cfgC.APIServerURL)
-	assert.Equal(t, cfgK.KubeConfig, cfgC.KubeConfig)
-	assert.Equal(t, cfgK.RequestTimeout, cfgC.RequestTimeout)
-	assert.Equal(t, cfgK.Namespace, cfgC.Namespace)
-	assert.ElementsMatch(t, cfgK.DomainFilter, cfgC.DomainFilter)
-	assert.Equal(t, cfgK.OCPRouterName, cfgC.OCPRouterName)
-}
-
-func TestNewCobraCommandBindsAndParsesSubset(t *testing.T) {
-	cfg := NewConfig()
-	cmd := newCobraCommand(cfg)
-
-	args := []string{
-		"--provider=aws",
-		"--source=service",
-		"--source=ingress",
-		"--server=http://127.0.0.1:8080",
-		"--kubeconfig=/some/path",
-		"--request-timeout=2s",
-		"--namespace=ns",
-		"--domain-filter=example.org",
-		"--domain-filter=company.com",
-		"--openshift-router-name=default",
-	}
-
-	cmd.SetArgs(args)
-	require.NoError(t, cmd.Execute())
-
-	assert.Equal(t, "aws", cfg.Provider)
-	assert.ElementsMatch(t, []string{"service", "ingress"}, cfg.Sources)
-	assert.Equal(t, "http://127.0.0.1:8080", cfg.APIServerURL)
-	assert.Equal(t, "/some/path", cfg.KubeConfig)
-	assert.Equal(t, 2*time.Second, cfg.RequestTimeout)
-	assert.Equal(t, "ns", cfg.Namespace)
-	assert.ElementsMatch(t, []string{"example.org", "company.com"}, cfg.DomainFilter)
-	assert.Equal(t, "default", cfg.OCPRouterName)
-}
-
-func TestNewCobraCommandDefaultsApplied(t *testing.T) {
-	cfg := NewConfig()
-	// Pre-populate some defaults to confirm they persist without args.
-	cfg.Sources = []string{"service"}
-	// provider to preserve the original test intent.
-	cfg.Provider = "aws"
-
-	cmd := newCobraCommand(cfg)
-	cmd.SetArgs([]string{})
-	require.NoError(t, cmd.Execute())
-
-	assert.ElementsMatch(t, []string{"service"}, cfg.Sources)
-	// DomainFilter defaults to a single empty entry for historical parity.
-	assert.Equal(t, []string{""}, cfg.DomainFilter)
-}
-
-func TestParseFlagsCliFlagCobraParitySubset(t *testing.T) {
-	args := []string{
-		"--cli-backend=cobra",
-		"--provider=aws",
-		"--source=service",
-		"--source=ingress",
-		"--server=http://127.0.0.1:8080",
-		"--kubeconfig=/some/path",
-		"--request-timeout=2s",
-		"--namespace=ns",
-		"--domain-filter=example.org",
-		"--domain-filter=company.com",
-		"--openshift-router-name=default",
-	}
-
-	// Kingpin baseline without the hidden flag
-	baselineArgs := append([]string{}, args[1:]...)
-	cfgK := NewConfig()
-	require.NoError(t, cfgK.ParseFlags(baselineArgs))
-
-	cfgC := NewConfig()
-	require.NoError(t, cfgC.ParseFlags(args))
-
-	assert.Equal(t, cfgK.Provider, cfgC.Provider)
-	assert.ElementsMatch(t, cfgK.Sources, cfgC.Sources)
-	assert.Equal(t, cfgK.APIServerURL, cfgC.APIServerURL)
-	assert.Equal(t, cfgK.KubeConfig, cfgC.KubeConfig)
-	assert.Equal(t, cfgK.RequestTimeout, cfgC.RequestTimeout)
-	assert.Equal(t, cfgK.Namespace, cfgC.Namespace)
-	assert.ElementsMatch(t, cfgK.DomainFilter, cfgC.DomainFilter)
-	assert.Equal(t, cfgK.OCPRouterName, cfgC.OCPRouterName)
-}
-
-func TestParseFlagsCliFlagOverridesEnv(t *testing.T) {
-	// Env requests cobra; CLI flag forces kingpin.
-	t.Setenv("EXTERNAL_DNS_CLI", "cobra")
-	args := []string{
-		"--cli-backend=kingpin",
-		"--provider=aws",
-		"--source=service",
-		// Flag not bound in Cobra newCobraCommand path; will error if cobra is used.
-		"--log-format=json",
-	}
-
-	cfg := NewConfig()
-	require.NoError(t, cfg.ParseFlags(args))
-	assert.Equal(t, "aws", cfg.Provider)
-	assert.ElementsMatch(t, []string{"service"}, cfg.Sources)
-	assert.Equal(t, "json", cfg.LogFormat)
 }
 
 func TestParseFlagsCliFlagSeparatedValue(t *testing.T) {
-	// Support "--cli-backend", "cobra" form as well.
 	args := []string{
-		"--cli-backend", "cobra",
 		"--provider=aws",
 		"--source=service",
 	}
 	cfg := NewConfig()
 	require.NoError(t, cfg.ParseFlags(args))
-	assert.Equal(t, "aws", cfg.Provider)
+	assert.Equal(t, ProviderAWS, cfg.Provider)
 	assert.ElementsMatch(t, []string{"service"}, cfg.Sources)
 }
 
-// Env vars are accpeted by Kingpin backend but ignored by Cobra
-func TestEnvVarsIgnoredByCobraBackend(t *testing.T) {
-	t.Setenv("EXTERNAL_DNS_CLI", "cobra")
-	t.Setenv("EXTERNAL_DNS_NAMESPACE", "ns-from-env")
-	t.Setenv("EXTERNAL_DNS_DRY_RUN", "1")
-
+func TestParseFlagsCRDRegistryNamespace(t *testing.T) {
 	cfg := NewConfig()
-	// Only required args for Cobra validation
-	args := []string{"--provider=aws", "--source=service"}
-	require.NoError(t, cfg.ParseFlags(args))
+	require.NoError(t, cfg.ParseFlags([]string{"--provider=aws", "--source=service"}))
+	assert.Empty(t, cfg.CRDRegistryNamespace, "unset, so the current namespace is resolved at startup")
 
-	// Ignore env vars and keep defaults
-	assert.Empty(t, cfg.Namespace)
-	assert.False(t, cfg.DryRun)
+	cfg = NewConfig()
+	require.NoError(t, cfg.ParseFlags([]string{"--provider=aws", "--source=service", "--crd-registry-namespace=external-dns"}))
+	assert.Equal(t, "external-dns", cfg.CRDRegistryNamespace)
 }
 
-func restoreEnv(t *testing.T, originalEnv map[string]string) {
-	for k, v := range originalEnv {
-		require.NoError(t, os.Setenv(k, v))
+func TestParseFlagsNamespaces(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "unset watches all namespaces",
+			want: nil,
+		},
+		{
+			name: "single value",
+			args: []string{"--namespace=team-a"},
+			want: []string{"team-a"},
+		},
+		{
+			name: "repeated flag",
+			args: []string{"--namespace=team-a", "--namespace=team-b"},
+			want: []string{"team-a", "team-b"},
+		},
+		{
+			name: "comma-separated list",
+			args: []string{"--namespace=team-a,team-b"},
+			want: []string{"team-a", "team-b"},
+		},
+		{
+			name: "both forms combined, with spaces and duplicates",
+			args: []string{"--namespace=team-a, team-b", "--namespace=team-b,team-c"},
+			want: []string{"team-a", "team-b", "team-c"},
+		},
+		{
+			name: "blank values are dropped",
+			args: []string{"--namespace=,team-a,"},
+			want: []string{"team-a"},
+		},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig()
+			require.NoError(t, cfg.ParseFlags(append([]string{"--provider=aws", "--source=service"}, tt.args...)))
+			assert.Equal(t, tt.want, cfg.Namespaces)
+		})
+	}
+}
+
+func TestParseFlagsNamespacesFromEnv(t *testing.T) {
+	t.Setenv("EXTERNAL_DNS_NAMESPACE", "team-a,team-b")
+
+	cfg := NewConfig()
+	require.NoError(t, cfg.ParseFlags([]string{"--provider=aws", "--source=service"}))
+
+	assert.Equal(t, []string{"team-a", "team-b"}, cfg.Namespaces)
 }
 
 func TestPasswordsNotLogged(t *testing.T) {
@@ -843,24 +744,14 @@ func TestParseFlagsGateway(t *testing.T) {
 	t.Parallel()
 	cfg := parseCfg(t,
 		"--gateway-label-filter=app=gateway",
+		"--gateway-listener-sets",
 		"--gateway-name=gw-1",
 		"--gateway-namespace=gw-ns",
 	)
 	assert.Equal(t, "app=gateway", cfg.GatewayLabelFilter)
+	assert.True(t, cfg.GatewayListenerSets)
 	assert.Equal(t, "gw-1", cfg.GatewayName)
 	assert.Equal(t, "gw-ns", cfg.GatewayNamespace)
-}
-
-func TestParseFlagsCloudFoundry(t *testing.T) {
-	t.Parallel()
-	cfg := parseCfg(t,
-		"--cf-api-endpoint=https://api.cf.example",
-		"--cf-username=user1",
-		"--cf-password=p@ss",
-	)
-	assert.Equal(t, "https://api.cf.example", cfg.CFAPIEndpoint)
-	assert.Equal(t, "user1", cfg.CFUsername)
-	assert.Equal(t, "p@ss", cfg.CFPassword)
 }
 
 func TestParseFlagsAzure(t *testing.T) {
@@ -913,16 +804,6 @@ func TestParseFlagsOCI(t *testing.T) {
 	assert.Equal(t, "ocid1.compartment.oc1..aaaa", cfg.OCICompartmentOCID)
 }
 
-func TestParseFlagsPlural(t *testing.T) {
-	t.Parallel()
-	cfg := parseCfg(t,
-		"--plural-cluster=mycluster",
-		"--plural-provider=aws",
-	)
-	assert.Equal(t, "mycluster", cfg.PluralCluster)
-	assert.Equal(t, "aws", cfg.PluralProvider)
-}
-
 func TestParseFlagsProviderCacheAndDynamoDB(t *testing.T) {
 	t.Parallel()
 	cfg := parseCfg(t,
@@ -953,15 +834,15 @@ func TestParseFlagsRFC2136(t *testing.T) {
 		"--rfc2136-port=5353",
 		"--rfc2136-zone=example.org.",
 		"--rfc2136-zone=example.com.",
-		"--rfc2136-create-ptr",
 		"--rfc2136-insecure",
+		"--rfc2136-axfr-insecure",
 		"--rfc2136-kerberos-realm=EXAMPLE.COM",
 		"--rfc2136-kerberos-username=svc-externaldns",
 		"--rfc2136-kerberos-password=secret",
 		"--rfc2136-tsig-keyname=keyname.",
 		"--rfc2136-tsig-secret=base64secret",
 		"--rfc2136-tsig-secret-alg=hmac-sha256",
-		"--rfc2136-tsig-axfr",
+		"--rfc2136-axfr",
 		"--rfc2136-min-ttl=30s",
 		"--rfc2136-gss-tsig",
 		"--rfc2136-use-tls",
@@ -969,19 +850,64 @@ func TestParseFlagsRFC2136(t *testing.T) {
 	)
 	assert.Equal(t, 5353, cfg.RFC2136Port)
 	assert.ElementsMatch(t, []string{"example.org.", "example.com."}, cfg.RFC2136Zone)
-	assert.True(t, cfg.RFC2136CreatePTR)
 	assert.True(t, cfg.RFC2136Insecure)
+	assert.True(t, cfg.RFC2136AXFRInsecure)
 	assert.Equal(t, "EXAMPLE.COM", cfg.RFC2136KerberosRealm)
 	assert.Equal(t, "svc-externaldns", cfg.RFC2136KerberosUsername)
 	assert.Equal(t, "secret", cfg.RFC2136KerberosPassword)
 	assert.Equal(t, "keyname.", cfg.RFC2136TSIGKeyName)
 	assert.Equal(t, "base64secret", cfg.RFC2136TSIGSecret)
 	assert.Equal(t, "hmac-sha256", cfg.RFC2136TSIGSecretAlg)
-	assert.True(t, cfg.RFC2136TAXFR)
+	assert.True(t, cfg.RFC2136AXFR)
 	assert.Equal(t, 30*time.Second, cfg.RFC2136MinTTL)
 	assert.True(t, cfg.RFC2136GSSTSIG)
 	assert.True(t, cfg.RFC2136UseTLS)
 	assert.True(t, cfg.RFC2136SkipTLSVerify)
+}
+
+func TestParseFlagsRFC2136AXFR(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		args           []string
+		wantAXFR       bool
+		wantDeprecated bool
+	}{
+		{
+			name:     "neither flag leaves AXFR disabled",
+			args:     nil,
+			wantAXFR: false,
+		},
+		{
+			name:     "new flag enables AXFR",
+			args:     []string{"--rfc2136-axfr"},
+			wantAXFR: true,
+		},
+		{
+			name:           "deprecated flag is promoted",
+			args:           []string{"--rfc2136-tsig-axfr"},
+			wantAXFR:       true,
+			wantDeprecated: true,
+		},
+		{
+			name:           "both flags enable AXFR",
+			args:           []string{"--rfc2136-tsig-axfr", "--rfc2136-axfr"},
+			wantAXFR:       true,
+			wantDeprecated: true,
+		},
+		{
+			name:           "deprecated flag wins over --no-rfc2136-axfr",
+			args:           []string{"--rfc2136-tsig-axfr", "--no-rfc2136-axfr"},
+			wantAXFR:       true,
+			wantDeprecated: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := NewConfig()
+			require.NoError(t, cfg.ParseFlags(append([]string{"--provider=rfc2136", "--source=service"}, tc.args...)))
+			assert.Equal(t, tc.wantAXFR, cfg.RFC2136AXFR)
+			assert.Equal(t, tc.wantDeprecated, cfg.RFC2136TAXFR)
+		})
+	}
 }
 
 func TestParseFlagsTraefik(t *testing.T) {
@@ -1014,11 +940,17 @@ func TestParseFlagsWebhookProvider(t *testing.T) {
 		"--webhook-provider-url=http://127.0.0.1:9999",
 		"--webhook-provider-read-timeout=7s",
 		"--webhook-provider-write-timeout=8s",
+		"--webhook-provider-read-header-timeout=3s",
+		"--webhook-provider-idle-timeout=15s",
+		"--webhook-provider-max-body-size=1048576",
 		"--webhook-server",
 	)
 	assert.Equal(t, "http://127.0.0.1:9999", cfg.WebhookProviderURL)
 	assert.Equal(t, 7*time.Second, cfg.WebhookProviderReadTimeout)
 	assert.Equal(t, 8*time.Second, cfg.WebhookProviderWriteTimeout)
+	assert.Equal(t, 3*time.Second, cfg.WebhookProviderReadHeaderTimeout)
+	assert.Equal(t, 15*time.Second, cfg.WebhookProviderIdleTimeout)
+	assert.Equal(t, int64(1<<20), cfg.WebhookProviderMaxBodySize)
 	assert.True(t, cfg.WebhookServer)
 }
 
@@ -1028,380 +960,6 @@ func TestParseFlagsMiscListeners(t *testing.T) {
 	assert.True(t, cfg.ListenEndpointEvents)
 }
 
-func TestNewCobraCommandValidationMissingProvider(t *testing.T) {
-	cfg := NewConfig()
-	cfg.Provider = ""
-	cfg.Sources = nil
-
-	cmd := newCobraCommand(cfg)
-	cmd.SetArgs([]string{})
-	err := cmd.Execute()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--provider is required")
-}
-
-func TestNewCobraCommandValidationInvalidProvider(t *testing.T) {
-	cfg := NewConfig()
-	cfg.Provider = "not-a-provider"
-	cfg.Sources = []string{"service"}
-
-	cmd := newCobraCommand(cfg)
-	cmd.SetArgs([]string{})
-	err := cmd.Execute()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid provider")
-}
-
-func TestNewCobraCommandValidationMissingSource(t *testing.T) {
-	cfg := NewConfig()
-	cfg.Provider = "aws"
-	cfg.Sources = nil
-
-	cmd := newCobraCommand(cfg)
-	cmd.SetArgs([]string{"--provider=aws"})
-	err := cmd.Execute()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--source is required")
-}
-
-func TestNewCobraCommandValidationInvalidSource(t *testing.T) {
-	cfg := NewConfig()
-	cmd := newCobraCommand(cfg)
-	cmd.SetArgs([]string{"--provider=aws", "--source=bogus"})
-	err := cmd.Execute()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid source")
-}
-
-func TestNewCobraCommandValidationValid(t *testing.T) {
-	cfg := NewConfig()
-	cmd := newCobraCommand(cfg)
-	cmd.SetArgs([]string{"--provider=aws", "--source=service"})
-	err := cmd.Execute()
-	require.NoError(t, err)
-}
-
-// Accepted binder/backend differences:
-// - Enum validation
-// - Boolean negation form
-// - Env var handling
-
-// Binder parity helpers
-
-// flagKind represents the kind of a bound flag.
-type flagKind int
-
-const (
-	fkString flagKind = iota
-	fkBool
-	fkDuration
-	fkInt
-	fkInt64
-	fkStrings
-	fkEnum
-	fkStringMap
-	fkRegexp
-)
-
-type flagMeta struct {
-	name    string
-	kind    flagKind
-	allowed []string // for enums
-}
-
-// recordingBinder wraps a real binder and records what was bound.
-type recordingBinder struct {
-	inner FlagBinder
-	flags []flagMeta
-}
-
-func (r *recordingBinder) record(name string, kind flagKind, allowed ...string) {
-	r.flags = append(r.flags, flagMeta{name: name, kind: kind, allowed: append([]string(nil), allowed...)})
-}
-
-func (r *recordingBinder) StringVar(name, help, def string, target *string) {
-	r.record(name, fkString)
-	r.inner.StringVar(name, help, def, target)
-}
-func (r *recordingBinder) BoolVar(name, help string, def bool, target *bool) {
-	r.record(name, fkBool)
-	r.inner.BoolVar(name, help, def, target)
-}
-func (r *recordingBinder) DurationVar(name, help string, def time.Duration, target *time.Duration) {
-	r.record(name, fkDuration)
-	r.inner.DurationVar(name, help, def, target)
-}
-func (r *recordingBinder) IntVar(name, help string, def int, target *int) {
-	r.record(name, fkInt)
-	r.inner.IntVar(name, help, def, target)
-}
-func (r *recordingBinder) Int64Var(name, help string, def int64, target *int64) {
-	r.record(name, fkInt64)
-	r.inner.Int64Var(name, help, def, target)
-}
-func (r *recordingBinder) StringsVar(name, help string, def []string, target *[]string) {
-	r.record(name, fkStrings)
-	r.inner.StringsVar(name, help, def, target)
-}
-func (r *recordingBinder) EnumVar(name, help, def string, target *string, allowed ...string) {
-	r.record(name, fkEnum, allowed...)
-	r.inner.EnumVar(name, help, def, target, allowed...)
-}
-func (r *recordingBinder) StringsEnumVar(name, help string, def []string, target *[]string, allowed ...string) {
-	// Not used by bindFlags currently; keep for completeness.
-	r.record(name, fkStrings)
-	r.inner.StringsEnumVar(name, help, def, target, allowed...)
-}
-func (r *recordingBinder) StringMapVar(name, help string, target *map[string]string) {
-	r.record(name, fkStringMap)
-	r.inner.StringMapVar(name, help, target)
-}
-func (r *recordingBinder) RegexpVar(name, help string, def *regexp.Regexp, target **regexp.Regexp) {
-	r.record(name, fkRegexp)
-	r.inner.RegexpVar(name, help, def, target)
-}
-
-// collectAllFlags binds flags to a Cobra binder (which includes provider/source)
-// and records all bound flags for test generation.
-func collectAllFlags(t *testing.T) []flagMeta {
-	t.Helper()
-	cmd := &cobra.Command{Use: "test"}
-	rb := &recordingBinder{inner: NewCobraBinder(cmd)}
-	cfg := &Config{}
-	// mirror helpers used elsewhere to stabilize defaults
-	cfg.AWSSDCreateTag = map[string]string{}
-	cfg.RegexDomainFilter = defaultConfig.RegexDomainFilter
-	bindFlags(rb, cfg)
-
-	// Make names unique and sorted for stable test order
-	byName := map[string]flagMeta{}
-	for _, f := range rb.flags {
-		byName[f.name] = f
-	}
-	names := make([]string, 0, len(byName))
-	for n := range byName {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := make([]flagMeta, 0, len(names))
-	for _, n := range names {
-		out = append(out, byName[n])
-	}
-	return out
-}
-
-func buildArgsCobra(f flagMeta) []string {
-	sw := func(n, v string) string { return fmt.Sprintf("--%s=%s", n, v) }
-	switch f.kind {
-	case fkString:
-		return []string{sw(f.name, "val")}
-	case fkBool:
-		return []string{sw(f.name, "true")}
-	case fkDuration:
-		return []string{sw(f.name, "2s")}
-	case fkInt:
-		return []string{sw(f.name, "42")}
-	case fkInt64:
-		return []string{sw(f.name, "64")}
-	case fkStrings:
-		return []string{sw(f.name, "one"), sw(f.name, "two")}
-	case fkEnum:
-		val := ""
-		for _, a := range f.allowed {
-			if a != "" {
-				val = a
-				break
-			}
-		}
-		if val == "" && len(f.allowed) > 0 {
-			val = f.allowed[0]
-		}
-		if val == "" {
-			val = "x"
-		}
-		return []string{sw(f.name, val)}
-	case fkStringMap:
-		return []string{sw(f.name, "foo=bar")}
-	case fkRegexp:
-		return []string{sw(f.name, "^ex[a-z]+$")}
-	default:
-		return nil
-	}
-}
-
-func buildArgsKingpin(f flagMeta) []string {
-	switch f.kind {
-	case fkString:
-		return []string{"--" + f.name + "=val"}
-	case fkBool:
-		// Kingpin expects --flag=true
-		return []string{"--" + f.name}
-	case fkDuration:
-		return []string{"--" + f.name + "=2s"}
-	case fkInt:
-		return []string{"--" + f.name + "=42"}
-	case fkInt64:
-		return []string{"--" + f.name + "=64"}
-	case fkStrings:
-		return []string{"--" + f.name + "=one", "--" + f.name + "=two"}
-	case fkEnum:
-		val := ""
-		for _, a := range f.allowed {
-			if a != "" {
-				val = a
-				break
-			}
-		}
-		if val == "" && len(f.allowed) > 0 {
-			val = f.allowed[0]
-		}
-		if val == "" {
-			val = "x"
-		}
-		return []string{"--" + f.name + "=" + val}
-	case fkStringMap:
-		return []string{"--" + f.name + "=foo=bar"}
-	case fkRegexp:
-		return []string{"--" + f.name + "=^ex[a-z]+$"}
-	default:
-		return nil
-	}
-}
-
-func normalizeConfig(c *Config) *Config {
-	cp := *c
-	// Regex fields: compare by string; ignore pointer identity
-	cp.RegexDomainFilter = nil
-	cp.RegexDomainExclusion = nil
-	// Treat nil/empty maps equivalently for comparison
-	if cp.AWSSDCreateTag == nil {
-		cp.AWSSDCreateTag = map[string]string{}
-	}
-	// Normalize nil slices to empty slices for parity
-	rv := reflect.ValueOf(&cp).Elem()
-	rt := rv.Type()
-	for i := 0; i < rv.NumField(); i++ {
-		f := rv.Field(i)
-		if f.Kind() == reflect.Slice && f.IsNil() {
-			f.Set(reflect.MakeSlice(rt.Field(i).Type, 0, 0))
-		}
-	}
-	return &cp
-}
-
-func TestBinderParity_AllFlags(t *testing.T) {
-	t.Parallel()
-	flags := collectAllFlags(t)
-
-	// Skip provider/source here: Kingpin does not bind them via bindFlags.
-	base := []string{}
-
-	for _, f := range flags {
-
-		if f.name == "provider" || f.name == "source" {
-			continue
-		}
-		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
-			argsK := append([]string{}, base...)
-			argsK = append(argsK, buildArgsKingpin(f)...)
-			argsC := append([]string{}, base...)
-			argsC = append(argsC, buildArgsCobra(f)...)
-
-			cfgK := runWithKingpin(t, argsK)
-			cfgC := runWithCobra(t, argsC)
-
-			nK := normalizeConfig(cfgK)
-			nC := normalizeConfig(cfgC)
-
-			if !reflect.DeepEqual(nK, nC) {
-				t.Fatalf("config mismatch for --%s\nKingpin args: %v\nCobra args: %v\nKingpin: %#v\n  Cobra: %#v", f.name, argsK, argsC, nK, nC)
-			}
-		})
-	}
-}
-
-func TestBinderParity_BoolFalse(t *testing.T) {
-	t.Parallel()
-	flags := collectAllFlags(t)
-	for _, f := range flags {
-		if f.kind != fkBool || f.name == "provider" || f.name == "source" {
-			continue
-		}
-
-		t.Run(f.name+"=false", func(t *testing.T) {
-			t.Parallel()
-			// Kingpin: --no-flag
-			argsK := []string{"--no-" + f.name}
-			// Cobra: --flag=false
-			argsC := []string{"--" + f.name + "=false"}
-
-			cfgK := runWithKingpin(t, argsK)
-			cfgC := runWithCobra(t, argsC)
-
-			nK := normalizeConfig(cfgK)
-			nC := normalizeConfig(cfgC)
-			if !reflect.DeepEqual(nK, nC) {
-				t.Fatalf("config mismatch for --%s=false\nKingpin args: %v\nCobra args: %v\nKingpin: %#v\n  Cobra: %#v", f.name, argsK, argsC, nK, nC)
-			}
-		})
-	}
-}
-
-func TestBinderParity_EnumsAllValues(t *testing.T) {
-	t.Parallel()
-	flags := collectAllFlags(t)
-	for _, f := range flags {
-		if f.kind != fkEnum || f.name == "provider" || f.name == "source" {
-			continue
-		}
-		// Deduplicate allowed values
-		seen := map[string]struct{}{}
-		for _, val := range f.allowed {
-			if _, ok := seen[val]; ok {
-				continue
-			}
-			seen[val] = struct{}{}
-			v := val // capture
-			t.Run(f.name+"="+v, func(t *testing.T) {
-				t.Parallel()
-				// Build args for each backend including empty string case
-				var argsK, argsC []string
-				if v == "" {
-					argsK = []string{"--" + f.name + "="}
-					argsC = []string{"--" + f.name + "="}
-				} else {
-					argsK = []string{"--" + f.name + "=" + v}
-					argsC = []string{"--" + f.name + "=" + v}
-				}
-
-				cfgK := runWithKingpin(t, argsK)
-				cfgC := runWithCobra(t, argsC)
-
-				nK := normalizeConfig(cfgK)
-				nC := normalizeConfig(cfgC)
-				if !reflect.DeepEqual(nK, nC) {
-					t.Fatalf("enum config mismatch for --%s=%q\nKingpin: %#v\n  Cobra: %#v", f.name, v, nK, nC)
-				}
-			})
-		}
-	}
-}
-
-// Verify defaults parity (no args) across binders. This asserts that
-// bindFlags applies the same default values irrespective of backend.
-func TestBinderParity_Defaults(t *testing.T) {
-	t.Parallel()
-	cfgK := runWithKingpin(t, []string{})
-	cfgC := runWithCobra(t, []string{})
-
-	nK := normalizeConfig(cfgK)
-	nC := normalizeConfig(cfgC)
-	if !reflect.DeepEqual(nK, nC) {
-		t.Fatalf("defaults config mismatch with no args\nKingpin: %#v\n  Cobra: %#v", nK, nC)
-	}
-}
-
 // Helpers to run bindFlags + parse for each binder.
 func runWithKingpin(t *testing.T, args []string) *Config {
 	t.Helper()
@@ -1409,85 +967,101 @@ func runWithKingpin(t *testing.T, args []string) *Config {
 	cfg.AWSSDCreateTag = map[string]string{}
 	cfg.RegexDomainFilter = defaultConfig.RegexDomainFilter
 	app := kingpin.New("test", "")
-	bindFlags(NewKingpinBinder(app), cfg)
+	bindFlags(flags.NewKingpinBinder(app), cfg)
 	_, err := app.Parse(args)
 	require.NoError(t, err)
 	return cfg
 }
 
-func runWithCobra(t *testing.T, args []string) *Config {
-	t.Helper()
-	cfg := &Config{}
-	cfg.AWSSDCreateTag = map[string]string{}
-	cfg.RegexDomainFilter = defaultConfig.RegexDomainFilter
-	cmd := &cobra.Command{Use: "test"}
-	bindFlags(NewCobraBinder(cmd), cfg)
-	cmd.SetArgs(args)
-	err := cmd.Execute()
-	require.NoError(t, err)
-	return cfg
-}
-
-func TestBinderParityScalars(t *testing.T) {
-	cases := []struct {
-		name   string
-		args   []string
-		getter func(*Config) interface{}
-		want   interface{}
-	}{
-		{"fqdn-template", []string{"--fqdn-template=tpl"}, func(c *Config) interface{} { return c.FQDNTemplate }, "tpl"},
-		{"dry-run", []string{"--dry-run"}, func(c *Config) interface{} { return c.DryRun }, true},
-		{"interval", []string{"--interval=2s"}, func(c *Config) interface{} { return c.Interval }, 2 * time.Second},
-		{"google-batch-change-size", []string{"--google-batch-change-size=123"}, func(c *Config) interface{} { return c.GoogleBatchChangeSize }, 123},
-	}
-
-	for _, tc := range cases {
-
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			cfgK := runWithKingpin(t, tc.args)
-			cfgC := runWithCobra(t, tc.args)
-			assert.Equal(t, tc.want, tc.getter(cfgK))
-			assert.Equal(t, tc.getter(cfgK), tc.getter(cfgC))
-		})
-	}
-}
-
 func TestBinderParityRepeatable(t *testing.T) {
 	args := []string{"--managed-record-types=A", "--managed-record-types=TXT"}
 	cfgK := runWithKingpin(t, args)
-	cfgC := runWithCobra(t, args)
 	assert.ElementsMatch(t, []string{"A", "TXT"}, cfgK.ManagedDNSRecordTypes)
-	assert.ElementsMatch(t, cfgK.ManagedDNSRecordTypes, cfgC.ManagedDNSRecordTypes)
 }
 
 func TestBinderParityMapAndRegexp(t *testing.T) {
 	args := []string{"--regex-domain-filter=^ex.*$", "--aws-sd-create-tag=foo=bar"}
 	cfgK := runWithKingpin(t, args)
-	cfgC := runWithCobra(t, args)
 
 	require.NotNil(t, cfgK.RegexDomainFilter)
-	require.NotNil(t, cfgC.RegexDomainFilter)
-	assert.Equal(t, cfgK.RegexDomainFilter.String(), cfgC.RegexDomainFilter.String())
-
 	require.NotNil(t, cfgK.AWSSDCreateTag)
-	require.NotNil(t, cfgC.AWSSDCreateTag)
 	assert.Equal(t, map[string]string{"foo": "bar"}, cfgK.AWSSDCreateTag)
-	assert.Equal(t, cfgK.AWSSDCreateTag, cfgC.AWSSDCreateTag)
 }
 
-// Kingpin validates enum values at parse time while Cobra does not
-// assert both behaviors so it is obvious and intentional
+func TestParseFlagsKubeAPIRequestTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		args           []string
+		wantTimeout    time.Duration
+		wantDeprecated time.Duration
+	}{
+		{
+			name:           "new flag sets KubeAPIRequestTimeout",
+			args:           []string{"--kube-api-request-timeout=60s"},
+			wantTimeout:    60 * time.Second,
+			wantDeprecated: 30 * time.Second,
+		},
+		{
+			name:           "deprecated flag is promoted",
+			args:           []string{"--request-timeout=45s"},
+			wantTimeout:    45 * time.Second,
+			wantDeprecated: 45 * time.Second,
+		},
+		{
+			name:           "new flag wins when both are set",
+			args:           []string{"--request-timeout=45s", "--kube-api-request-timeout=90s"},
+			wantTimeout:    45 * time.Second,
+			wantDeprecated: 45 * time.Second,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := NewConfig()
+			require.NoError(t, cfg.ParseFlags(append([]string{"--provider=aws", "--source=service"}, tc.args...)))
+			assert.Equal(t, tc.wantTimeout, cfg.KubeAPIRequestTimeout)
+			assert.Equal(t, tc.wantDeprecated, cfg.RequestTimeout)
+		})
+	}
+}
+
+func TestParseFlagsKubeAPIRateLimit(t *testing.T) {
+	cfg := NewConfig()
+	require.NoError(t, cfg.ParseFlags([]string{
+		"--provider=aws",
+		"--source=service",
+		"--kube-api-qps=10",
+		"--kube-api-burst=20",
+	}))
+
+	assert.Equal(t, 10, cfg.KubeAPIQPS)
+	assert.Equal(t, 20, cfg.KubeAPIBurst)
+}
+
+func TestParseFlagsKubeAPIRateLimitDefaults(t *testing.T) {
+	cfg := NewConfig()
+	require.NoError(t, cfg.ParseFlags([]string{
+		"--provider=aws",
+		"--source=service",
+	}))
+
+	assert.Equal(t, int(rest.DefaultQPS), cfg.KubeAPIQPS)
+	assert.Equal(t, rest.DefaultBurst, cfg.KubeAPIBurst)
+}
+
+// Kingpin validates enum values at parse time
 func TestBinderEnumValidationDifference(t *testing.T) {
 	// Kingpin should reject unknown enum values
 	appArgs := []string{"--google-zone-visibility=bogus"}
 	app := kingpin.New("test", "")
 	cfgK := &Config{}
-	bindFlags(NewKingpinBinder(app), cfgK)
+	bindFlags(flags.NewKingpinBinder(app), cfgK)
 	_, err := app.Parse(appArgs)
 	require.Error(t, err)
+}
 
-	// Cobra should accept and set the value
-	cfgC := runWithCobra(t, appArgs)
-	assert.Equal(t, "bogus", cfgC.GoogleZoneVisibility)
+func TestIsPTRSupported(t *testing.T) {
+	cfg := &Config{ManagedDNSRecordTypes: []string{endpoint.RecordTypeA}}
+	assert.False(t, cfg.IsPTRSupported())
+
+	cfg.ManagedDNSRecordTypes = append(cfg.ManagedDNSRecordTypes, endpoint.RecordTypePTR)
+	assert.True(t, cfg.IsPTRSupported())
 }

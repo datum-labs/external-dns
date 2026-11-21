@@ -23,11 +23,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeinformers "k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"sigs.k8s.io/external-dns/source/informers"
 
 	v1alpha3 "istio.io/api/networking/v1alpha3"
 	istiov1a "istio.io/client-go/pkg/apis/networking/v1"
@@ -37,7 +40,7 @@ import (
 
 func BenchmarkEndpointTargetsFromServicesMedium(b *testing.B) {
 	svcInformer, err := svcInformerWithServices(36, 1000)
-	assert.NoError(b, err)
+	require.NoError(b, err)
 
 	sel := map[string]string{"app": "nginx", "env": "prod"}
 
@@ -49,7 +52,7 @@ func BenchmarkEndpointTargetsFromServicesMedium(b *testing.B) {
 
 func BenchmarkEndpointTargetsFromServicesMediumIterateOverGateways(b *testing.B) {
 	svcInformer, err := svcInformerWithServices(36, 500)
-	assert.NoError(b, err)
+	require.NoError(b, err)
 
 	gateways := fixturesIstioGatewaySvcWithLabels(15, 70)
 
@@ -62,7 +65,7 @@ func BenchmarkEndpointTargetsFromServicesMediumIterateOverGateways(b *testing.B)
 
 func BenchmarkEndpointTargetsFromServicesHigh(b *testing.B) {
 	svcInformer, err := svcInformerWithServices(36, 40000)
-	assert.NoError(b, err)
+	require.NoError(b, err)
 	sel := map[string]string{"app": "nginx", "env": "prod"}
 
 	for b.Loop() {
@@ -74,7 +77,7 @@ func BenchmarkEndpointTargetsFromServicesHigh(b *testing.B) {
 // This benchmark tests the performance of EndpointTargetsFromServices with a high number of services and gateways.
 func BenchmarkEndpointTargetsFromServicesHighIterateOverGateways(b *testing.B) {
 	svcInformer, err := svcInformerWithServices(36, 40000)
-	assert.NoError(b, err)
+	require.NoError(b, err)
 
 	gateways := fixturesIstioGatewaySvcWithLabels(50, 1000)
 
@@ -92,12 +95,7 @@ func svcInformerWithServices(toLookup, underTest int) (coreinformers.ServiceInfo
 	svcInformer := informerFactory.Core().V1().Services()
 	ctx := context.Background()
 
-	_, err := svcInformer.Informer().AddEventHandler(
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-			},
-		},
-	)
+	_, err := svcInformer.Informer().AddEventHandler(informers.DefaultEventHandler())
 	if err != nil {
 		return nil, fmt.Errorf("failed to add event handler: %w", err)
 	}
@@ -143,10 +141,8 @@ func fixturesSvcWithLabels(toLookup, underTest int) []*corev1.Service {
 
 	var createService = func(name string, namespace string, selector map[string]string) *corev1.Service {
 		return &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: namespace,
-			},
+			Name:      name,
+			Namespace: namespace,
 			Spec: corev1.ServiceSpec{
 				Selector:    selector,
 				ExternalIPs: randomIPs(),
@@ -155,19 +151,19 @@ func fixturesSvcWithLabels(toLookup, underTest int) []*corev1.Service {
 	}
 
 	// services with specific labels
-	for i := 0; i < toLookup; i++ {
+	for i := range toLookup {
 		svc := createService("nginx-svc-"+strconv.Itoa(i), "default", map[string]string{"app": "nginx", "env": "prod"})
 		services = append(services, svc)
 	}
 
 	// services with random labels
-	for i := 0; i < underTest; i++ {
+	for i := range underTest {
 		svc := createService("random-svc-"+strconv.Itoa(i), "default", randomLabels(i))
 		services = append(services, svc)
 	}
 
 	// Shuffle the services to ensure randomness
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rand.Shuffle(len(services), func(i, j int) {
 			services[i], services[j] = services[j], services[i]
 		})
@@ -195,10 +191,8 @@ func fixturesIstioGatewaySvcWithLabels(toLookup, underTest int) []*istiov1a.Gate
 
 	var createGateway = func(name string, namespace string, selector map[string]string) *istiov1a.Gateway {
 		return &istiov1a.Gateway{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: namespace,
-			},
+			Name:      name,
+			Namespace: namespace,
 			Spec: v1alpha3.Gateway{
 				Selector: selector,
 				Servers: []*v1alpha3.Server{
@@ -211,19 +205,19 @@ func fixturesIstioGatewaySvcWithLabels(toLookup, underTest int) []*istiov1a.Gate
 		}
 	}
 	// services with specific labels
-	for i := 0; i < toLookup; i++ {
+	for i := range toLookup {
 		svc := createGateway("istio-gw-"+strconv.Itoa(i), "default", map[string]string{"app": "nginx", "env": "prod"})
 		result = append(result, svc)
 	}
 
 	// services with random labels
-	for i := 0; i < underTest; i++ {
+	for i := range underTest {
 		svc := createGateway("istio-random-svc-"+strconv.Itoa(i), "default", randomLabels(i))
 		result = append(result, svc)
 	}
 
 	// Shuffle the services to ensure randomness
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rand.Shuffle(len(result), func(i, j int) {
 			result[i], result[j] = result[j], result[i]
 		})
